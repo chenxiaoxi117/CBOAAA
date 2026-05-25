@@ -224,6 +224,10 @@ def method_history_policy_map(groups):
             "scheduler_tradeoff_alpha": float(getattr(CFG, "SCHEDULER_TRADEOFF_ALPHA", 0.85)),
             "scheduler_alpha_min": float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)),
             "scheduler_alpha_max": float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97)),
+            "alpha_direct_bounds": getattr(CFG, "ALPHA_DIRECT_BOUNDS", None),
+            "alpha_direct_rt_bounds": getattr(CFG, "ALPHA_DIRECT_RT_BOUNDS", None),
+            "alpha_direct_batch_bounds": getattr(CFG, "ALPHA_DIRECT_BATCH_BOUNDS", None),
+            "alpha_direct_ai_bounds": getattr(CFG, "ALPHA_DIRECT_AI_BOUNDS", None),
             "tr_mode": group_cfg.get("cbo_tr_mode", _cfg_cbo_str("CBO_TR_MODE", "off")),
             "tr_anchor_mode": group_cfg.get("cbo_tr_anchor_mode", _cfg_cbo_str("CBO_TR_ANCHOR_MODE", "posterior_mean")),
             "tr_update_mode": group_cfg.get("cbo_tr_update_mode", _cfg_cbo_str("CBO_TR_UPDATE_MODE", "best_so_far")),
@@ -3558,6 +3562,10 @@ USER_METHOD_ALIASES = {
     "cbo_pressure_taskmix_counts": "reduced6_cbo_lite_pressure_taskmix_counts",
     "cbo-ptc": "reduced6_cbo_lite_pressure_taskmix_counts",
     "cbo_ptc": "reduced6_cbo_lite_pressure_taskmix_counts",
+    "cbo-alpha-direct": "reduced6_cbo_alpha_direct",
+    "cbo_alpha_direct": "reduced6_cbo_alpha_direct",
+    "alpha-direct": "reduced6_cbo_alpha_direct",
+    "alpha_direct": "reduced6_cbo_alpha_direct",
     "cbo-full-taskmix": "reduced6_cbo_lite_full_taskmix",
     "cbo_full_taskmix": "reduced6_cbo_lite_full_taskmix",
     "cbo-full-taskmix-counts": "reduced6_cbo_lite_full_taskmix_counts",
@@ -3740,6 +3748,10 @@ def run_scenario_group(seed, group_key, group_cfg):
     configure_refactor_agent(fac.agent, group_cfg)
     fac.perf_log["group_key"] = group_key
     fac.perf_log["group_label"] = group_cfg["label"]
+    old_scheduler_tradeoff_mode = str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy"))
+    method_scheduler_tradeoff_mode = group_cfg.get("scheduler_tradeoff_mode")
+    if method_scheduler_tradeoff_mode:
+        CFG.SCHEDULER_TRADEOFF_MODE = str(method_scheduler_tradeoff_mode)
     # v6.2 runtime logging: per-method and per-iteration elapsed time.
     runtime_group_t0 = time.perf_counter()
     runtime_group_wall_t0 = time.time()
@@ -3815,7 +3827,7 @@ def run_scenario_group(seed, group_key, group_cfg):
             flush=True,
         )
 
-    is_reduced = group_cfg.get("control_mode") in {"reduced4", "reduced6"}
+    is_reduced = group_cfg.get("control_mode") in {"reduced4", "reduced6", "alpha_direct"}
     fac.disable_internal_agent_tell = bool(is_reduced and fac.agent is not None)
 
     for i in range(CFG.BO_ITERATIONS):
@@ -3982,6 +3994,33 @@ def run_scenario_group(seed, group_key, group_cfg):
                 continue
             fac.perf_log.setdefault(k, []).append(v)
         fac.perf_log.setdefault("theta_control_deployed", []).append(list(theta_control))
+        fac.perf_log.setdefault("theta_full_deployed", []).append(list(theta_full))
+        fac.perf_log.setdefault("theta_full_feature_names", []).append(list(getattr(CFG, "FEATURE_NAMES", [])))
+        fac.perf_log.setdefault("control_vector_meaning", []).append("deployed_full_theta")
+        if group_cfg.get("control_mode") == "alpha_direct":
+            clip_fn = globals().get("clip_alpha_direct_control_vector")
+            alpha_control = clip_fn(theta_control) if callable(clip_fn) else list(theta_control)
+            while len(alpha_control) < 6:
+                alpha_control.append(None)
+            fac.perf_log.setdefault("alpha_direct_control_vector_6d", []).append(list(alpha_control[:6]))
+            fac.perf_log.setdefault("alpha_direct_feature_names", []).append(list(globals().get("ALPHA_DIRECT_FEATURE_NAMES", [
+                "Alpha_RT", "Alpha_Batch", "Alpha_AI", "W_Queue", "W_Risk_Scale", "Cloud_Gate"
+            ])))
+            fac.perf_log.setdefault("alpha_direct_alpha_rt", []).append(alpha_control[0])
+            fac.perf_log.setdefault("alpha_direct_alpha_batch", []).append(alpha_control[1])
+            fac.perf_log.setdefault("alpha_direct_alpha_ai", []).append(alpha_control[2])
+            fac.perf_log.setdefault("alpha_direct_w_queue", []).append(alpha_control[3])
+            fac.perf_log.setdefault("alpha_direct_w_risk_scale", []).append(alpha_control[4])
+            fac.perf_log.setdefault("alpha_direct_cloud_gate", []).append(alpha_control[5])
+        else:
+            fac.perf_log.setdefault("alpha_direct_control_vector_6d", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_feature_names", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_alpha_rt", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_alpha_batch", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_alpha_ai", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_w_queue", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_w_risk_scale", []).append(None)
+            fac.perf_log.setdefault("alpha_direct_cloud_gate", []).append(None)
         fac.perf_log.setdefault("agent_use_context", []).append(bool(getattr(fac.agent, "use_context", False)) if fac.agent is not None else False)
 
         # v6.2 runtime logging: append one elapsed-time sample per BO window.
@@ -4085,4 +4124,6 @@ def run_scenario_group(seed, group_key, group_cfg):
     fac.perf_log["runtime_context_dim"] = [int(context_dim)]
     fac.perf_log["runtime_total_model_dim"] = [int(total_model_dim)]
     fac.perf_log["cohort_feedback_debug_rows"] = list(getattr(fac, "cohort_feedback_rows", []))
+    if method_scheduler_tradeoff_mode:
+        CFG.SCHEDULER_TRADEOFF_MODE = old_scheduler_tradeoff_mode
     return fac.perf_log

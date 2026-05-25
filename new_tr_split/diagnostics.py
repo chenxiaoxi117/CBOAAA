@@ -89,6 +89,26 @@ def group_log_to_dataframe(log, group_key, group_label):
                 selected_candidate_source = "acquisition_candidate"
             elif deploy_src:
                 selected_candidate_source = deploy_src
+        theta_full_deployed = _log_get_safe(log, "theta_full_deployed", i, control)
+        alpha_direct_control = _log_get_safe(log, "alpha_direct_control_vector_6d", i, None)
+        if _is_missing_value(alpha_direct_control):
+            theta_control = _log_get_safe(log, "theta_control_deployed", i, None)
+            if isinstance(theta_control, (list, tuple, np.ndarray)) and len(theta_control) == 6:
+                alpha_direct_control = list(theta_control)
+            elif isinstance(theta_full_deployed, (list, tuple, np.ndarray)) and len(theta_full_deployed) >= 11:
+                alpha_direct_control = [
+                    theta_full_deployed[0], theta_full_deployed[1], theta_full_deployed[2],
+                    theta_full_deployed[6], theta_full_deployed[7], theta_full_deployed[10],
+                ]
+        if not isinstance(alpha_direct_control, (list, tuple, np.ndarray)):
+            alpha_direct_control = [None] * 6
+        alpha_direct_control = list(alpha_direct_control)[:6]
+        while len(alpha_direct_control) < 6:
+            alpha_direct_control.append(None)
+        alpha_feature_names = _log_get_safe(log, "alpha_direct_feature_names", i, globals().get("ALPHA_DIRECT_FEATURE_NAMES", [
+            "Alpha_RT", "Alpha_Batch", "Alpha_AI", "W_Queue", "W_Risk_Scale", "Cloud_Gate"
+        ]))
+        theta_full_feature_names = _log_get_safe(log, "theta_full_feature_names", i, list(getattr(CFG, "FEATURE_NAMES", [])))
         macro_gate_mode_row = _log_get_non_nan(log, "cbo_macro_gate_mode", i, str(getattr(CFG, "CBO_MACRO_GATE_MODE", "off")))
         default_source_pool = "macro_pool" if str(macro_gate_mode_row).strip().lower() == "hierarchical" else None
         actual_anchor_reason_row = _log_get_ffill(log, "actual_tr_anchor_reason", i, None)
@@ -344,6 +364,17 @@ def group_log_to_dataframe(log, group_key, group_label):
             "Beta_Boltzmann系数": log.get("beta", [None] * n)[i],
             "Control_Label_控制标签": log.get("control_label", [None] * n)[i] if i < len(log.get("control_label", [])) else None,
             "Control_Vector_控制向量": _safe_json(control),
+            "Control_Vector_Meaning": _log_get_safe(log, "control_vector_meaning", i, "deployed_full_theta"),
+            "Alpha_Direct_Control_Vector_6D": _safe_json(alpha_direct_control),
+            "Alpha_Direct_Feature_Names": _safe_json(alpha_feature_names),
+            "Theta_Full_Deployed_11D": _safe_json(theta_full_deployed),
+            "Theta_Full_Feature_Names": _safe_json(theta_full_feature_names),
+            "Alpha_RT": alpha_direct_control[0],
+            "Alpha_Batch": alpha_direct_control[1],
+            "Alpha_AI": alpha_direct_control[2],
+            "W_Queue_alpha_direct": alpha_direct_control[3],
+            "W_Risk_Scale_alpha_direct": alpha_direct_control[4],
+            "Cloud_Gate_alpha_direct": alpha_direct_control[5],
             "Alloc_By_Type_分任务节点分配": _safe_json(log.get("alloc_by_type", [None] * n)[i] if i < len(log.get("alloc_by_type", [])) else None),
             "Context_Label_情景标签": log.get("context_label", [None] * n)[i] if i < len(log.get("context_label", [])) else None,
             "Context_Vector_情景向量": _safe_json(log.get("context_vector", [None] * n)[i] if i < len(log.get("context_vector", [])) else None),

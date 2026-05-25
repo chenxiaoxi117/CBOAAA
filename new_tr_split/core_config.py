@@ -500,10 +500,14 @@ class ExperimentConfig:
     USE_BO_QUEUE_WEIGHT = True
 
     # Scheduler node-score tradeoff. Defaults preserve the old linear score.
-    SCHEDULER_TRADEOFF_MODE = "legacy"  # legacy / alpha_fixed / alpha_from_ratio
+    SCHEDULER_TRADEOFF_MODE = "legacy"  # legacy / alpha_fixed / alpha_from_ratio / alpha_direct
     SCHEDULER_TRADEOFF_ALPHA = 0.85
     SCHEDULER_ALPHA_MIN = 0.60
     SCHEDULER_ALPHA_MAX = 0.97
+    ALPHA_DIRECT_BOUNDS = None
+    ALPHA_DIRECT_RT_BOUNDS = None
+    ALPHA_DIRECT_BATCH_BOUNDS = None
+    ALPHA_DIRECT_AI_BOUNDS = None
     SCHEDULER_SERVICE_LATENCY_WEIGHT = 1.0
     SCHEDULER_SERVICE_RISK_WEIGHT = 1.0
     SCHEDULER_SERVICE_QUEUE_WEIGHT = 1.0
@@ -673,7 +677,7 @@ class ExperimentConfig:
     BASE_SEED = 42  # 默认实验主种子
     # 服务器当前 no-RoundRobin runner 默认值，写入脚本方便备份和复现实验。
     DEFAULT_NO_RR_OUTPUT_FAMILY = "v6_500_bestcbo_direct36_norr"
-    DEFAULT_SCENARIO_FEEDBACK_SCORE = "task_effective_backlog_violation"
+    DEFAULT_SCENARIO_FEEDBACK_SCORE = "window_original"
     DEFAULT_BO_HISTORY_MODE = "recent"
     DEFAULT_BO_RECENT_WINDOW = 80
     # CBO stability extensions. Defaults intentionally preserve existing behavior.

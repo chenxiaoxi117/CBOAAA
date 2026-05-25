@@ -221,7 +221,7 @@ class BoltzmannScheduler:
         debug["legacy_norm_mode"] = self.norm_mode
         return norm_e, norm_l, norm_r, debug
 
-    def _resolve_scheduler_alpha(self, task_type, latency_w, energy_w):
+    def _resolve_scheduler_alpha(self, task_type, latency_w, energy_w, theta_full=None, controls=None):
         mode = str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy") or "legacy").lower()
         alpha_min = float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60))
         alpha_max = float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97))
@@ -235,6 +235,12 @@ class BoltzmannScheduler:
             denom = max(float(latency_w) + float(energy_w), eps)
             alpha_raw = float(latency_w) / denom
             return float(np.clip(alpha_raw, alpha_min, alpha_max)), f"{task_type}_latency_energy_ratio", mode
+        if mode in {"alpha_direct", "direct_alpha"}:
+            alpha_raw = float(latency_w)
+            task_bounds_fn = globals().get("get_alpha_direct_task_bounds")
+            if callable(task_bounds_fn):
+                alpha_min, alpha_max = task_bounds_fn(task_type)
+            return float(np.clip(alpha_raw, alpha_min, alpha_max)), f"Alpha_{task_type}", "alpha_direct"
         if mode != "legacy":
             raise ValueError(f"Unknown scheduler tradeoff mode={mode}")
         return None, "legacy_linear_weights", mode
@@ -275,7 +281,7 @@ class BoltzmannScheduler:
         energy_w = energy_weights.get(task.task_type, 1.0)
         risk_w = float(CFG.TASK_RISK_WEIGHTS.get(task.task_type, CFG.DEADLINE_WEIGHT))
         queue_w = 0.0
-        alpha, alpha_source, tradeoff_mode = self._resolve_scheduler_alpha(task.task_type, latency_w, energy_w)
+        alpha, alpha_source, tradeoff_mode = self._resolve_scheduler_alpha(task.task_type, latency_w, energy_w, theta_full=theta_full)
         raw_infos = []
         for idx, node in enumerate(nodes):
             raw_infos.append(self._node_score(task, idx, node, latency_w, energy_w, risk_w))
@@ -510,7 +516,7 @@ class ConstrainedBoltzmannScheduler(BoltzmannScheduler):
         base_risk_w = float(CFG.TASK_RISK_WEIGHTS.get(task.task_type, CFG.DEADLINE_WEIGHT))
         risk_w = base_risk_w * float(controls.get("risk_scale", getattr(CFG, "RISK_SCALE_DEFAULT", 1.0)))
         queue_w = float(controls.get("queue_w", getattr(CFG, "QUEUE_WEIGHT_DEFAULT", 1.0))) if getattr(CFG, "USE_QUEUE_PRESSURE_SCORE", True) else 0.0
-        alpha, alpha_source, tradeoff_mode = self._resolve_scheduler_alpha(task.task_type, latency_w, energy_w)
+        alpha, alpha_source, tradeoff_mode = self._resolve_scheduler_alpha(task.task_type, latency_w, energy_w, theta_full=theta_full, controls=controls)
 
         raw_infos = [self._node_score(task, idx, node, latency_w, energy_w, risk_w) for idx, node in enumerate(nodes)]
         candidates, feasibility_debug = self._apply_feasibility_filter(task, nodes, raw_infos, controls)

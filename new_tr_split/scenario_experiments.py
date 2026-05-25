@@ -247,6 +247,20 @@ def build_scenario_method_groups():
         "reduced6_cbo_lite_pressure_recent_mix": cbo_lite_group("Pressure+RecentMix Context", "pressure_recent_mix"),
         "reduced6_cbo_lite_pressure_counts": cbo_lite_group("Pressure+Counts Context", "pressure_counts"),
         "reduced6_cbo_lite_pressure_taskmix_counts": cbo_lite_group("Pressure+TaskMix+Counts Context", "pressure_taskmix_counts"),
+        "reduced6_cbo_alpha_direct": {
+            "label": "Reduced6 CBO Alpha-Direct",
+            "norm_mode": "fixed",
+            "control_mode": "alpha_direct",
+            "scheduler_tradeoff_mode": "alpha_direct",
+            "deploy_policy": "greedy",
+            "method_family": "cbo_alpha_direct",
+            "context_mode": "pressure_taskmix_counts",
+            "history_mode": "recent_confidence",
+            "recent_window": 80,
+            "confidence_min": 0.35,
+            "confidence_min_samples": 12,
+            "agent_kwargs": alpha_direct_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="none", context_mode="pressure_taskmix_counts"),
+        },
         "reduced6_cbo_lite_full_taskmix": cbo_lite_group("Full+TaskMix Context", "full_taskmix"),
         "reduced6_cbo_lite_full_taskmix_counts": cbo_lite_group("Full+TaskMix+Counts Context", "full_taskmix_counts"),
         "reduced6_cbo_greedy_legacy": {
@@ -424,6 +438,8 @@ def reduced4_to_full_theta(theta4):
 def map_group_theta_to_full(theta, group_cfg):
     if group_cfg.get("control_mode") == "reduced4":
         return reduced4_to_full_theta(theta)
+    if group_cfg.get("control_mode") == "alpha_direct":
+        return alpha_direct_to_full_theta(theta)
     if group_cfg.get("control_mode") == "reduced6":
         return reduced6_to_full_theta(theta)
     return list(theta)
@@ -552,6 +568,127 @@ def reduced6_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode
     }
 
 
+ALPHA_DIRECT_FEATURE_NAMES = [
+    "Alpha_RT", "Alpha_Batch", "Alpha_AI",
+    "W_Queue", "W_Risk_Scale", "Cloud_Gate"
+]
+
+
+def _coerce_bounds_pair(value, fallback):
+    pair = fallback
+    if value is not None:
+        try:
+            pair = list(value)
+        except Exception:
+            pair = fallback
+    if pair is None or len(pair) < 2:
+        pair = fallback
+    lo = float(pair[0])
+    hi = float(pair[1])
+    if lo > hi:
+        lo, hi = hi, lo
+    return (lo, hi)
+
+
+def get_alpha_direct_task_bounds(task_type):
+    task_key = str(task_type or "").strip().upper()
+    default_pair = _coerce_bounds_pair(
+        getattr(CFG, "ALPHA_DIRECT_BOUNDS", None),
+        (float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)), float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97))),
+    )
+    attr_map = {
+        "RT": "ALPHA_DIRECT_RT_BOUNDS",
+        "BATCH": "ALPHA_DIRECT_BATCH_BOUNDS",
+        "AI": "ALPHA_DIRECT_AI_BOUNDS",
+    }
+    return _coerce_bounds_pair(getattr(CFG, attr_map.get(task_key, ""), None), default_pair)
+
+
+def get_alpha_direct_control_bounds():
+    rt_lo, rt_hi = get_alpha_direct_task_bounds("RT")
+    batch_lo, batch_hi = get_alpha_direct_task_bounds("Batch")
+    ai_lo, ai_hi = get_alpha_direct_task_bounds("AI")
+    return [
+        [rt_lo, batch_lo, ai_lo,
+         float(CFG.CONTROL_QUEUE_BOUNDS[0]), float(CFG.CONTROL_RISK_SCALE_BOUNDS[0]), float(REDUCED6_CLOUD_GATE_BOUNDS[0])],
+        [rt_hi, batch_hi, ai_hi,
+         float(CFG.CONTROL_QUEUE_BOUNDS[1]), float(CFG.CONTROL_RISK_SCALE_BOUNDS[1]), float(REDUCED6_CLOUD_GATE_BOUNDS[1])],
+    ]
+
+
+def clip_alpha_direct_control_vector(theta6):
+    base = [0.85, 0.85, 0.85, 1.0, 1.0, 0.30]
+    t = list(theta6)
+    if len(t) < 6:
+        t = t + base[len(t):]
+    rt_lo, rt_hi = get_alpha_direct_task_bounds("RT")
+    batch_lo, batch_hi = get_alpha_direct_task_bounds("Batch")
+    ai_lo, ai_hi = get_alpha_direct_task_bounds("AI")
+    return [
+        float(np.clip(float(t[0]), rt_lo, rt_hi)),
+        float(np.clip(float(t[1]), batch_lo, batch_hi)),
+        float(np.clip(float(t[2]), ai_lo, ai_hi)),
+        float(np.clip(float(t[3]), *CFG.CONTROL_QUEUE_BOUNDS)),
+        float(np.clip(float(t[4]), *CFG.CONTROL_RISK_SCALE_BOUNDS)),
+        float(np.clip(float(t[5]), float(REDUCED6_CLOUD_GATE_BOUNDS[0]), float(REDUCED6_CLOUD_GATE_BOUNDS[1]))),
+    ]
+
+
+ALPHA_DIRECT_BOUNDS = get_alpha_direct_control_bounds()
+
+
+def alpha_direct_to_full_theta(theta6):
+    """Map alpha-direct controls into the full scheduler theta."""
+    alpha_rt, alpha_batch, alpha_ai, queue_w, risk_scale, cloud_gate = clip_alpha_direct_control_vector(theta6)
+    full = default_control_vector(fill=1.5)
+    names = list(CFG.FEATURE_NAMES)
+
+    def set_name(name, value):
+        if name in names:
+            full[names.index(name)] = float(value)
+
+    set_name("W_RT_Latency", alpha_rt)
+    set_name("W_Batch_Latency", alpha_batch)
+    set_name("W_AI_Latency", alpha_ai)
+    set_name("W_RT_Energy", 1.0)
+    set_name("W_Batch_Energy", 1.0)
+    set_name("W_AI_Energy", 1.0)
+    set_name("W_Queue", queue_w)
+    set_name("W_Risk_Scale", risk_scale)
+    set_name("Cloud_Gate", cloud_gate)
+    set_name("Beta_Control", 8.0)
+    set_name("Opportunity_Rho", 0.0)
+    return full
+
+
+def alpha_direct_anchor_points(anchor_mode="none"):
+    mode = str(anchor_mode or "none").strip().lower()
+    if mode in {"none", "cold", "cold_start", "no_anchor", "off"}:
+        return []
+    points = [
+        [0.85, 0.85, 0.85, 1.0, 1.0, 0.50],
+        [0.92, 0.90, 0.90, 1.0, 1.0, 0.05],
+        [0.78, 0.78, 0.78, 5.0, 1.0, 0.30],
+    ]
+    return [clip_alpha_direct_control_vector(p) for p in points]
+
+
+def alpha_direct_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="none", context_mode=None):
+    context_dim = len(lite_context_feature_names(context_mode)) if context_mode else (len(CFG.CONTEXT_FEATURE_NAMES) if use_context else 0)
+    context_bounds = lite_context_bounds(context_mode) if context_mode else (CFG.CONTEXT_BOUNDS if use_context else None)
+    return {
+        "dim": len(ALPHA_DIRECT_FEATURE_NAMES),
+        "bounds": get_alpha_direct_control_bounds(),
+        "feature_names": list(ALPHA_DIRECT_FEATURE_NAMES),
+        "use_context": bool(use_context),
+        "use_state_partition": bool(use_context and not context_mode),
+        "use_trust_region": bool(use_trust_region),
+        "context_dim": context_dim,
+        "context_bounds": context_bounds,
+        "anchor_points": alpha_direct_anchor_points(anchor_mode),
+    }
+
+
 def _control_feature_names_for_vector(vec):
     try:
         n = len(vec)
@@ -580,7 +717,11 @@ def run_scenario_group(seed, group_key, group_cfg):
     configure_refactor_agent(fac.agent, group_cfg)
     fac.perf_log["group_key"] = group_key
     fac.perf_log["group_label"] = group_cfg["label"]
-    is_reduced = group_cfg.get("control_mode") == "reduced4"
+    old_scheduler_tradeoff_mode = str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy"))
+    method_scheduler_tradeoff_mode = group_cfg.get("scheduler_tradeoff_mode")
+    if method_scheduler_tradeoff_mode:
+        CFG.SCHEDULER_TRADEOFF_MODE = str(method_scheduler_tradeoff_mode)
+    is_reduced = group_cfg.get("control_mode") in {"reduced4", "reduced6", "alpha_direct"}
     fac.disable_internal_agent_tell = bool(is_reduced and fac.agent is not None)
 
     for i in range(CFG.BO_ITERATIONS):
@@ -615,6 +756,8 @@ def run_scenario_group(seed, group_key, group_cfg):
     if fac._use_cohort_feedback() and bool(getattr(CFG, "COHORT_FORCE_FINALIZE_AT_RUN_END", True)):
         fac._finalize_ready_cohorts(fac.current_time, force=True, reason="run_end")
     fac.perf_log["cohort_feedback_debug_rows"] = list(getattr(fac, "cohort_feedback_rows", []))
+    if method_scheduler_tradeoff_mode:
+        CFG.SCHEDULER_TRADEOFF_MODE = old_scheduler_tradeoff_mode
     return fac.perf_log
 
 def best_so_far(seq):
@@ -985,6 +1128,11 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "scheduler_tradeoff_alpha": float(getattr(CFG, "SCHEDULER_TRADEOFF_ALPHA", 0.85)),
             "scheduler_alpha_min": float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)),
             "scheduler_alpha_max": float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97)),
+            "alpha_direct_bounds": getattr(CFG, "ALPHA_DIRECT_BOUNDS", None),
+            "alpha_direct_rt_bounds": getattr(CFG, "ALPHA_DIRECT_RT_BOUNDS", None),
+            "alpha_direct_batch_bounds": getattr(CFG, "ALPHA_DIRECT_BATCH_BOUNDS", None),
+            "alpha_direct_ai_bounds": getattr(CFG, "ALPHA_DIRECT_AI_BOUNDS", None),
+            "alpha_direct_effective_bounds": get_alpha_direct_control_bounds(),
             "scheduler_service_latency_weight": float(getattr(CFG, "SCHEDULER_SERVICE_LATENCY_WEIGHT", 1.0)),
             "scheduler_service_risk_weight": float(getattr(CFG, "SCHEDULER_SERVICE_RISK_WEIGHT", 1.0)),
             "scheduler_service_queue_weight": float(getattr(CFG, "SCHEDULER_SERVICE_QUEUE_WEIGHT", 1.0)),

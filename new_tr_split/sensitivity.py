@@ -172,7 +172,7 @@ def _candidate_scores_for_task(theta, task_type, origin_node_id=0, seed=0, norm_
         candidates = [min(raw_infos, key=lambda c: c.get("latency_total", 1e18))]
         feasibility_debug["fallback_reason"] = "empty_after_all_filters_static_diag"
     norm_e, norm_l, norm_r, norm_q, norm_debug = scheduler._compute_norms_with_queue(task, candidates)
-    alpha, _alpha_source, tradeoff_mode = scheduler._resolve_scheduler_alpha(task_type, latency_w, energy_w)
+    alpha, _alpha_source, tradeoff_mode = scheduler._resolve_scheduler_alpha(task_type, latency_w, energy_w, theta_full=theta)
     for i, c in enumerate(candidates):
         c["norm_e"] = float(norm_e[i])
         c["norm_l"] = float(norm_l[i])

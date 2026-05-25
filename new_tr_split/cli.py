@@ -6,6 +6,22 @@
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
+
+    def _parse_bounds_pair_arg(value, option_name):
+        if value is None or str(value).strip() == "":
+            return None
+        parts = [p.strip() for p in str(value).split(",")]
+        if len(parts) != 2:
+            parser.error(f"{option_name} must be formatted as low,high")
+        try:
+            lo = float(parts[0])
+            hi = float(parts[1])
+        except ValueError:
+            parser.error(f"{option_name} must contain numeric low,high values")
+        if lo > hi:
+            lo, hi = hi, lo
+        return (lo, hi)
+
     parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "offline_noise"], default="all")
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--local-delta", type=float, default=0.08)
@@ -30,7 +46,7 @@ if __name__ == "__main__":
     parser.add_argument("--bo-interval", type=float, default=None, help="覆盖 BO_INTERVAL")
     parser.add_argument("--session-duration", type=float, default=None, help="覆盖 SESSION_DURATION")
     parser.add_argument("--feedback-mode", choices=["window", "cohort_complete", "dual"], default="window", help="BO反馈模式：window为旧窗口级反馈；cohort_complete为任务批次完成后反馈；dual为窗口快反馈+批次/分类精反馈替换")
-    parser.add_argument("--feedback-score", choices=["window_original", "task_effective", "task_effective_backlog", "task_effective_backlog_violation", "paired_fixed_mid_delta", "legacy_dual", "legacy_cohort"], default=getattr(CFG, "DEFAULT_SCENARIO_FEEDBACK_SCORE", "task_effective_backlog_violation"), help="BO tell 使用的训练反馈；备份版默认 task_effective_backlog_violation。paired_fixed_mid_delta 为仿真专用：同窗口 shadow fixed_mid 的 delta cost。")
+    parser.add_argument("--feedback-score", choices=["window_original", "task_effective", "task_effective_backlog", "task_effective_backlog_violation", "paired_fixed_mid_delta", "legacy_dual", "legacy_cohort"], default=getattr(CFG, "DEFAULT_SCENARIO_FEEDBACK_SCORE", "window_original"), help="BO tell 使用的训练反馈；默认 window_original，即 BO_Training_Cost=Eval_Cost。paired_fixed_mid_delta 为仿真专用：同窗口 shadow fixed_mid 的 delta cost。")
     parser.add_argument("--cbo-reference-mode", choices=["off", "calibrate", "load", "auto_macro"], default="off", help="Scenario reference baseline mode for normalized metrics")
     parser.add_argument("--cbo-reference-calibration-rounds", type=int, default=30, help="Rounds used to build/freeze scenario reference")
     parser.add_argument("--cbo-reference-min-rounds", type=int, default=5, help="Minimum rounds before reference is considered available")
@@ -50,10 +66,14 @@ if __name__ == "__main__":
     parser.add_argument("--cbo-class-imbalance-weight", type=float, default=0.0, help="class completion imbalance penalty in service_norm")
     parser.add_argument("--cbo-normalized-ratio-clip-min", type=float, default=0.2, help="min clip for normalized ratios")
     parser.add_argument("--cbo-normalized-ratio-clip-max", type=float, default=5.0, help="max clip for normalized ratios")
-    parser.add_argument("--scheduler-tradeoff-mode", choices=["legacy", "alpha_fixed", "alpha_from_ratio"], default="legacy", help="底层调度器节点 score 的 service-energy tradeoff 模式；默认 legacy 保持旧逻辑")
+    parser.add_argument("--scheduler-tradeoff-mode", choices=["legacy", "alpha_fixed", "alpha_from_ratio", "alpha_direct"], default="legacy", help="底层调度器节点 score 的 service-energy tradeoff 模式；默认 legacy 保持旧逻辑")
     parser.add_argument("--scheduler-tradeoff-alpha", type=float, default=0.85, help="alpha_fixed 模式下的 service 权重 alpha")
     parser.add_argument("--scheduler-alpha-min", type=float, default=0.60, help="scheduler alpha 下限")
     parser.add_argument("--scheduler-alpha-max", type=float, default=0.97, help="scheduler alpha 上限")
+    parser.add_argument("--alpha-direct-bounds", type=str, default=None, help="alpha_direct uniform BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-rt-bounds", type=str, default=None, help="alpha_direct RT BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-batch-bounds", type=str, default=None, help="alpha_direct Batch BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-ai-bounds", type=str, default=None, help="alpha_direct AI BO bounds, formatted as low,high")
     parser.add_argument("--scheduler-service-latency-weight", type=float, default=1.0, help="alpha tradeoff 中 norm_l 的系数")
     parser.add_argument("--scheduler-service-risk-weight", type=float, default=1.0, help="alpha 外部 risk_w*norm_risk 惩罚项的额外系数")
     parser.add_argument("--scheduler-service-queue-weight", type=float, default=1.0, help="alpha 外部 queue_w*norm_queue 惩罚项的额外系数")
@@ -188,6 +208,14 @@ if __name__ == "__main__":
     CFG.SCHEDULER_TRADEOFF_ALPHA = float(args.scheduler_tradeoff_alpha)
     CFG.SCHEDULER_ALPHA_MIN = float(args.scheduler_alpha_min)
     CFG.SCHEDULER_ALPHA_MAX = float(args.scheduler_alpha_max)
+    alpha_direct_bounds = _parse_bounds_pair_arg(args.alpha_direct_bounds, "--alpha-direct-bounds")
+    alpha_direct_rt_bounds = _parse_bounds_pair_arg(args.alpha_direct_rt_bounds, "--alpha-direct-rt-bounds")
+    alpha_direct_batch_bounds = _parse_bounds_pair_arg(args.alpha_direct_batch_bounds, "--alpha-direct-batch-bounds")
+    alpha_direct_ai_bounds = _parse_bounds_pair_arg(args.alpha_direct_ai_bounds, "--alpha-direct-ai-bounds")
+    CFG.ALPHA_DIRECT_BOUNDS = alpha_direct_bounds
+    CFG.ALPHA_DIRECT_RT_BOUNDS = alpha_direct_rt_bounds
+    CFG.ALPHA_DIRECT_BATCH_BOUNDS = alpha_direct_batch_bounds
+    CFG.ALPHA_DIRECT_AI_BOUNDS = alpha_direct_ai_bounds
     CFG.SCHEDULER_SERVICE_LATENCY_WEIGHT = float(args.scheduler_service_latency_weight)
     CFG.SCHEDULER_SERVICE_RISK_WEIGHT = float(args.scheduler_service_risk_weight)
     CFG.SCHEDULER_SERVICE_QUEUE_WEIGHT = float(args.scheduler_service_queue_weight)
@@ -203,6 +231,11 @@ if __name__ == "__main__":
         f"service_risk_weight={CFG.SCHEDULER_SERVICE_RISK_WEIGHT} "
         f"service_queue_weight={CFG.SCHEDULER_SERVICE_QUEUE_WEIGHT} "
         f"energy_weight={CFG.SCHEDULER_ENERGY_WEIGHT}",
+        flush=True,
+    )
+    print(
+        f"[ALPHA-DIRECT-BOUNDS] uniform={CFG.ALPHA_DIRECT_BOUNDS} "
+        f"rt={CFG.ALPHA_DIRECT_RT_BOUNDS} batch={CFG.ALPHA_DIRECT_BATCH_BOUNDS} ai={CFG.ALPHA_DIRECT_AI_BOUNDS}",
         flush=True,
     )
     print(
