@@ -1,0 +1,28 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated experiment outputs
+results/
+sched_quick_*/
+pic_core_v2/
+pic_scenario_trust_region/
+
+# Large generated exports
+*.tar.gz
+*.zip
+
+# Local editor/OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
