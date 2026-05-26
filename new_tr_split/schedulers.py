@@ -97,6 +97,42 @@ class BoltzmannScheduler:
             return
         self.beta = float(np.clip(self.beta + self.delta * np.sign(gap), *CFG.CONTROL_BETA_BOUNDS))
 
+    def _boltzmann_distribution_debug(self, scores, probs, choice):
+        scores = np.asarray(scores, dtype=float)
+        probs = np.asarray(probs, dtype=float)
+        finite = np.isfinite(scores)
+        if len(scores) == 0 or not finite.any():
+            return {
+                "score_gap_best_2nd": np.nan,
+                "score_gap_min_max": np.nan,
+                "boltzmann_top1_prob": np.nan,
+                "boltzmann_selected_prob": np.nan,
+                "boltzmann_entropy": np.nan,
+                "boltzmann_entropy_norm": np.nan,
+            }
+        valid_scores = scores[finite]
+        valid_indices = np.where(finite)[0]
+        order = np.argsort(valid_scores)
+        best_i = int(valid_indices[order[0]])
+        if len(valid_scores) >= 2:
+            gap_best_2nd = float(valid_scores[order[1]] - valid_scores[order[0]])
+        else:
+            gap_best_2nd = 0.0
+        gap_min_max = float(np.max(valid_scores) - np.min(valid_scores))
+        top1_prob = float(probs[best_i]) if 0 <= best_i < len(probs) else np.nan
+        selected_prob = float(probs[int(choice)]) if 0 <= int(choice) < len(probs) else np.nan
+        p = probs[np.isfinite(probs) & (probs > 0.0)]
+        entropy = float(-np.sum(p * np.log(p))) if len(p) else 0.0
+        entropy_norm = float(entropy / np.log(len(probs))) if len(probs) > 1 else 0.0
+        return {
+            "score_gap_best_2nd": gap_best_2nd,
+            "score_gap_min_max": gap_min_max,
+            "boltzmann_top1_prob": top1_prob,
+            "boltzmann_selected_prob": selected_prob,
+            "boltzmann_entropy": entropy,
+            "boltzmann_entropy_norm": entropy_norm,
+        }
+
     def _node_score(self, task, node_idx, node, latency_w, energy_w, risk_w):
         """先只计算该节点对当前任务的原始指标，真正的归一化和 score 在 select_node() 里做。
 
@@ -250,18 +286,25 @@ class BoltzmannScheduler:
         norm_e = float(c.get("norm_e", 0.0))
         norm_r = float(c.get("norm_risk", 0.0)) if getattr(CFG, "USE_SCORE_RISK", True) else 0.0
         norm_q = float(c.get("norm_queue", 0.0)) if getattr(CFG, "USE_QUEUE_PRESSURE_SCORE", True) else 0.0
-        if str(tradeoff_mode).lower() == "legacy":
+        mode = str(tradeoff_mode).lower()
+        if mode == "legacy":
             service_component = float(latency_w) * norm_l + float(risk_w) * norm_r + float(queue_w) * norm_q
             energy_component = float(energy_w) * norm_e
             score = energy_component + service_component
             latency_energy_component = energy_component + float(latency_w) * norm_l
+            latency_energy_component_unscaled = latency_energy_component
+            latency_energy_component_scaled = latency_energy_component
+            scheduler_le_scale = 1.0
         else:
             a = float(alpha if alpha is not None else getattr(CFG, "SCHEDULER_TRADEOFF_ALPHA", 0.85))
             latency_component = norm_l
             energy_component = norm_e
             risk_penalty = float(risk_w) * norm_r
             queue_penalty = float(queue_w) * norm_q
-            latency_energy_component = a * latency_component + (1.0 - a) * energy_component
+            latency_energy_component_unscaled = a * latency_component + (1.0 - a) * energy_component
+            scheduler_le_scale = float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)) if mode == "alpha_direct" else 1.0
+            latency_energy_component_scaled = scheduler_le_scale * latency_energy_component_unscaled
+            latency_energy_component = latency_energy_component_scaled
             service_component = latency_energy_component  # Deprecated alias kept for old analysis scripts.
             score = latency_energy_component + risk_penalty + queue_penalty
             c["latency_component"] = float(latency_component)
@@ -270,6 +313,9 @@ class BoltzmannScheduler:
             c["risk_penalty"] = float(risk_penalty)
             c["queue_penalty"] = float(queue_penalty)
             c["service_component_deprecated"] = float(service_component)
+        c["scheduler_le_scale"] = float(scheduler_le_scale)
+        c["latency_energy_component_unscaled"] = float(latency_energy_component_unscaled)
+        c["latency_energy_component_scaled"] = float(latency_energy_component_scaled)
         c["latency_energy_component"] = float(latency_energy_component)
         c["base_latency_energy_score"] = float(latency_energy_component)
         return float(score), float(service_component), float(energy_component)
@@ -325,6 +371,8 @@ class BoltzmannScheduler:
                 choice = int(self.np_rng.choice(len(candidates), p=probs))
         selected = candidates[choice]
         selected_idx = int(selected["node_idx"])
+        score_dist_debug = self._boltzmann_distribution_debug(candidate_scores, probs, choice)
+        all_scores = np.array([c.get("score", np.nan) for c in candidates], dtype=float)
         self.last_score_debug = {
             "norm_mode": self.norm_mode,
             "task_type": task.task_type,
@@ -334,6 +382,7 @@ class BoltzmannScheduler:
             "scheduler_alpha_source": alpha_source,
             "scheduler_alpha_min": float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)),
             "scheduler_alpha_max": float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97)),
+            "scheduler_le_scale": float(selected.get("scheduler_le_scale", 1.0)),
             "latency_w": float(latency_w),
             "energy_w": float(energy_w),
             "risk_w": float(risk_w),
@@ -346,6 +395,7 @@ class BoltzmannScheduler:
             "risk_norm_min": float(np.min(norm_r)),
             "risk_norm_max": float(np.max(norm_r)),
             "candidate_count": int(len(candidates)),
+            "opportunity_candidate_count": int(len(candidates)),
             "selected_node": int(selected_idx),
             "selected_norm_e": float(selected.get("norm_e", 0.0)),
             "selected_norm_l": float(selected.get("norm_l", 0.0)),
@@ -355,11 +405,16 @@ class BoltzmannScheduler:
             "selected_risk_penalty": float(selected.get("risk_penalty", 0.0)),
             "selected_queue_penalty": float(selected.get("queue_penalty", 0.0)),
             "selected_latency_energy_component": float(selected.get("latency_energy_component", np.nan)),
+            "selected_latency_energy_component_unscaled": float(selected.get("latency_energy_component_unscaled", np.nan)),
+            "selected_latency_energy_component_scaled": float(selected.get("latency_energy_component_scaled", np.nan)),
             "selected_base_latency_energy_score": float(selected.get("base_latency_energy_score", np.nan)),
             "selected_service_component": float(selected.get("service_component", np.nan)),
             "selected_service_component_deprecated": float(selected.get("service_component", np.nan)),
             "selected_energy_component": float(selected.get("energy_component", np.nan)),
             "selected_score": float(selected.get("score", np.nan)),
+            "score_min": float(np.nanmin(all_scores)) if len(all_scores) else 0.0,
+            "score_max": float(np.nanmax(all_scores)) if len(all_scores) else 0.0,
+            **score_dist_debug,
         }
         return selected_idx, probs.tolist(), float(selected.get("score", 0.0))
 
@@ -568,6 +623,7 @@ class ConstrainedBoltzmannScheduler(BoltzmannScheduler):
         for i, c in enumerate(opportunity_candidates):
             full_probs[int(c["node_idx"])] = float(probs[i])
 
+        score_dist_debug = self._boltzmann_distribution_debug(candidate_scores, probs, choice)
         all_scores = np.array([c.get("score", np.nan) for c in candidates], dtype=float)
         self.last_score_debug = {
             "norm_mode": self.norm_mode,
@@ -583,6 +639,7 @@ class ConstrainedBoltzmannScheduler(BoltzmannScheduler):
             "scheduler_alpha_source": alpha_source,
             "scheduler_alpha_min": float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)),
             "scheduler_alpha_max": float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97)),
+            "scheduler_le_scale": float(selected.get("scheduler_le_scale", 1.0)),
             **norm_debug,
             **feasibility_debug,
             **opportunity_debug,
@@ -601,12 +658,15 @@ class ConstrainedBoltzmannScheduler(BoltzmannScheduler):
             "selected_risk_penalty": float(selected.get("risk_penalty", 0.0)),
             "selected_queue_penalty": float(selected.get("queue_penalty", 0.0)),
             "selected_latency_energy_component": float(selected.get("latency_energy_component", np.nan)),
+            "selected_latency_energy_component_unscaled": float(selected.get("latency_energy_component_unscaled", np.nan)),
+            "selected_latency_energy_component_scaled": float(selected.get("latency_energy_component_scaled", np.nan)),
             "selected_base_latency_energy_score": float(selected.get("base_latency_energy_score", np.nan)),
             "selected_service_component": float(selected.get("service_component", np.nan)),
             "selected_service_component_deprecated": float(selected.get("service_component", np.nan)),
             "selected_energy_component": float(selected.get("energy_component", np.nan)),
             "score_min": float(np.nanmin(all_scores)) if len(all_scores) else 0.0,
             "score_max": float(np.nanmax(all_scores)) if len(all_scores) else 0.0,
+            **score_dist_debug,
         }
         return selected_idx, full_probs, float(selected.get("score", 0.0))
 

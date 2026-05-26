@@ -217,7 +217,8 @@ def aggregate_logs(logs):
             "state_beta_boost_reason", "service_guard_mode", "service_guard_reason",
             "macro_context_key", "energy_metric_source", "cbo_reference_mode", "cbo_reference_status", "cbo_objective_mode", "bo_training_cost_source",
             "scheduler_tradeoff_mode", "scheduler_score_norm_mode",
-            "control_vector_meaning", "alpha_direct_feature_names", "theta_full_feature_names",
+            "context_mode", "context_status",
+            "control_vector_meaning", "alpha_direct_feature_names", "theta_full_feature_names", "context_feature_names",
         }:
             result[key] = [next((row[j] for row in matrix if row[j] is not None), None) for j in range(min_len)]
             continue

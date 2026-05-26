@@ -3,6 +3,11 @@
 # Split from new_TR.py lines 11636-12014.
 # Original command-line interface block.
 
+try:
+    from .runtime import *  # noqa: F401,F403
+except ImportError:
+    from runtime import *  # noqa: F401,F403
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -22,6 +27,17 @@ if __name__ == "__main__":
             lo, hi = hi, lo
         return (lo, hi)
 
+    def _parse_float_list_arg(value, option_name, expected_len):
+        if value is None or str(value).strip() == "":
+            return None
+        parts = [p.strip() for p in str(value).split(",")]
+        if len(parts) != int(expected_len):
+            parser.error(f"{option_name} must contain exactly {int(expected_len)} comma-separated values")
+        try:
+            return [float(p) for p in parts]
+        except ValueError:
+            parser.error(f"{option_name} must contain numeric values")
+
     parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "offline_noise"], default="all")
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--local-delta", type=float, default=0.08)
@@ -30,10 +46,11 @@ if __name__ == "__main__":
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--fixed-rng", action="store_true")
     parser.add_argument("--fixed-seed", type=int, default=None)
+    parser.add_argument("--no-boltzmann-random", action="store_true", help="Disable Boltzmann stochastic node selection and choose the minimum score candidate")
     parser.add_argument("--ratio-step", type=int, default=10, help="任务比例网格步长，默认10，即10%%")
     parser.add_argument("--ratio-min", type=int, default=10, help="每类任务最低比例，默认10，即至少10%%")
     parser.add_argument("--output-root", type=str, default=None, help="ratio_grid输出根目录")
-    parser.add_argument("--selected-keys", type=str, default=None, help="逗号分隔的方法键；默认使用备份版 no-RoundRobin 方法集")
+    parser.add_argument("--selected-keys", type=str, default=None, help="逗号分隔的方法键；例如 cbo-alpha-direct-prev-unfinished-context 或 cbo-alpha-direct-unfinished-context；默认使用备份版 no-RoundRobin 方法集")
     parser.add_argument("--sensitivity-scenarios", type=str, default="default,rt_high,batch_high,ai_high", help="敏感度场景：default,rt_high,batch_high,ai_high 或 name:RT,Batch,AI")
     parser.add_argument("--sens-seeds", type=int, default=2, help="敏感度分析每个参数点重复的随机种子数")
     parser.add_argument("--sens-windows", type=int, default=3, help="敏感度分析每个 theta 连续评价的窗口数")
@@ -70,10 +87,12 @@ if __name__ == "__main__":
     parser.add_argument("--scheduler-tradeoff-alpha", type=float, default=0.85, help="alpha_fixed 模式下的 service 权重 alpha")
     parser.add_argument("--scheduler-alpha-min", type=float, default=0.60, help="scheduler alpha 下限")
     parser.add_argument("--scheduler-alpha-max", type=float, default=0.97, help="scheduler alpha 上限")
+    parser.add_argument("--scheduler-le-scale", type=float, default=1.0, help="alpha_direct only: scale alpha*norm_l+(1-alpha)*norm_e before risk/queue penalties")
     parser.add_argument("--alpha-direct-bounds", type=str, default=None, help="alpha_direct uniform BO bounds, formatted as low,high")
     parser.add_argument("--alpha-direct-rt-bounds", type=str, default=None, help="alpha_direct RT BO bounds, formatted as low,high")
     parser.add_argument("--alpha-direct-batch-bounds", type=str, default=None, help="alpha_direct Batch BO bounds, formatted as low,high")
     parser.add_argument("--alpha-direct-ai-bounds", type=str, default=None, help="alpha_direct AI BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-fixed-theta", type=str, default=None, help="Fixed alpha_direct 6D theta for cbo-alpha-direct/cbo-alpha-direct-no-risk runs")
     parser.add_argument("--scheduler-service-latency-weight", type=float, default=1.0, help="alpha tradeoff 中 norm_l 的系数")
     parser.add_argument("--scheduler-service-risk-weight", type=float, default=1.0, help="alpha 外部 risk_w*norm_risk 惩罚项的额外系数")
     parser.add_argument("--scheduler-service-queue-weight", type=float, default=1.0, help="alpha 外部 queue_w*norm_queue 惩罚项的额外系数")
@@ -141,6 +160,13 @@ if __name__ == "__main__":
     parser.add_argument("--cbo-radius-surprise-boost-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_RADIUS_SURPRISE_BOOST_THRESHOLD", 2.0), help="Surprise threshold that boosts radius_state_adaptive beta")
     parser.add_argument("--cbo-radius-beta-boost", type=float, default=getattr(CFG, "DEFAULT_CBO_RADIUS_BETA_BOOST", 1.5), help="Multiplicative beta boost for unstable radius_state_adaptive state")
     parser.add_argument("--cbo-radius-beta-cap", type=float, default=getattr(CFG, "DEFAULT_CBO_RADIUS_BETA_CAP", 3.0), help="Upper cap after radius_state_adaptive beta boost")
+    parser.add_argument("--cbo-good-region-guard", choices=["on", "off"], default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_GUARD", "off"), help="Enable alpha_direct deployment fallback to the best rolling good region")
+    parser.add_argument("--cbo-good-region-window", type=int, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_WINDOW", 50), help="Rolling window used to maintain the good-region deployment anchor")
+    parser.add_argument("--cbo-good-region-worse-pct", type=float, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_WORSE_PCT", 0.03), help="Relative rolling-cost degradation that triggers good-region fallback")
+    parser.add_argument("--cbo-good-region-distance-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_DISTANCE_THRESHOLD", 0.35), help="Normalized theta distance from good region that triggers fallback")
+    parser.add_argument("--cbo-good-region-tr-radius-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15), help="TR radius threshold that triggers good-region fallback")
+    parser.add_argument("--cbo-good-region-beta-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_BETA_THRESHOLD", 0.5), help="Acquisition beta threshold that triggers good-region fallback")
+    parser.add_argument("--cbo-good-region-guard-mode", choices=["conservative", "distance_only", "performance_only"], default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_GUARD_MODE", "conservative"), help="Condition set used by the good-region deployment guard")
     parser.add_argument("--cbo-service-guard-mode", choices=["off", "soft"], default=getattr(CFG, "DEFAULT_CBO_SERVICE_GUARD_MODE", "off"), help="Optional service-aware exploration score guard")
     parser.add_argument("--cbo-service-guard-delay-pct", type=float, default=getattr(CFG, "DEFAULT_CBO_SERVICE_GUARD_DELAY_PCT", 0.03), help="Delay degradation threshold for service guard")
     parser.add_argument("--cbo-service-guard-backlog-pct", type=float, default=getattr(CFG, "DEFAULT_CBO_SERVICE_GUARD_BACKLOG_PCT", 0.03), help="Backlog degradation threshold for service guard")
@@ -175,6 +201,8 @@ if __name__ == "__main__":
         CFG.USE_FIXED_RNG = True
     if args.fixed_seed is not None:
         CFG.FIXED_RNG_SEED = args.fixed_seed
+    if args.no_boltzmann_random:
+        CFG.USE_BOLTZMANN_RANDOM = False
     if args.rt_deadline_factor is not None:
         CFG.TASK_PROPS["RT"]["deadline_factor"] = float(args.rt_deadline_factor)
     if args.bo_iterations is not None:
@@ -208,14 +236,17 @@ if __name__ == "__main__":
     CFG.SCHEDULER_TRADEOFF_ALPHA = float(args.scheduler_tradeoff_alpha)
     CFG.SCHEDULER_ALPHA_MIN = float(args.scheduler_alpha_min)
     CFG.SCHEDULER_ALPHA_MAX = float(args.scheduler_alpha_max)
+    CFG.SCHEDULER_LE_SCALE = float(args.scheduler_le_scale)
     alpha_direct_bounds = _parse_bounds_pair_arg(args.alpha_direct_bounds, "--alpha-direct-bounds")
     alpha_direct_rt_bounds = _parse_bounds_pair_arg(args.alpha_direct_rt_bounds, "--alpha-direct-rt-bounds")
     alpha_direct_batch_bounds = _parse_bounds_pair_arg(args.alpha_direct_batch_bounds, "--alpha-direct-batch-bounds")
     alpha_direct_ai_bounds = _parse_bounds_pair_arg(args.alpha_direct_ai_bounds, "--alpha-direct-ai-bounds")
+    alpha_direct_fixed_theta = _parse_float_list_arg(args.alpha_direct_fixed_theta, "--alpha-direct-fixed-theta", 6)
     CFG.ALPHA_DIRECT_BOUNDS = alpha_direct_bounds
     CFG.ALPHA_DIRECT_RT_BOUNDS = alpha_direct_rt_bounds
     CFG.ALPHA_DIRECT_BATCH_BOUNDS = alpha_direct_batch_bounds
     CFG.ALPHA_DIRECT_AI_BOUNDS = alpha_direct_ai_bounds
+    CFG.ALPHA_DIRECT_FIXED_THETA = alpha_direct_fixed_theta
     CFG.SCHEDULER_SERVICE_LATENCY_WEIGHT = float(args.scheduler_service_latency_weight)
     CFG.SCHEDULER_SERVICE_RISK_WEIGHT = float(args.scheduler_service_risk_weight)
     CFG.SCHEDULER_SERVICE_QUEUE_WEIGHT = float(args.scheduler_service_queue_weight)
@@ -227,6 +258,7 @@ if __name__ == "__main__":
     print(
         f"[SCHED-TRADEOFF] mode={CFG.SCHEDULER_TRADEOFF_MODE} "
         f"alpha={CFG.SCHEDULER_TRADEOFF_ALPHA} alpha_min={CFG.SCHEDULER_ALPHA_MIN} alpha_max={CFG.SCHEDULER_ALPHA_MAX} "
+        f"le_scale={CFG.SCHEDULER_LE_SCALE} "
         f"service_latency_weight={CFG.SCHEDULER_SERVICE_LATENCY_WEIGHT} "
         f"service_risk_weight={CFG.SCHEDULER_SERVICE_RISK_WEIGHT} "
         f"service_queue_weight={CFG.SCHEDULER_SERVICE_QUEUE_WEIGHT} "
@@ -235,7 +267,8 @@ if __name__ == "__main__":
     )
     print(
         f"[ALPHA-DIRECT-BOUNDS] uniform={CFG.ALPHA_DIRECT_BOUNDS} "
-        f"rt={CFG.ALPHA_DIRECT_RT_BOUNDS} batch={CFG.ALPHA_DIRECT_BATCH_BOUNDS} ai={CFG.ALPHA_DIRECT_AI_BOUNDS}",
+        f"rt={CFG.ALPHA_DIRECT_RT_BOUNDS} batch={CFG.ALPHA_DIRECT_BATCH_BOUNDS} ai={CFG.ALPHA_DIRECT_AI_BOUNDS} "
+        f"fixed_theta={CFG.ALPHA_DIRECT_FIXED_THETA}",
         flush=True,
     )
     print(
@@ -306,6 +339,13 @@ if __name__ == "__main__":
     CFG.CBO_RADIUS_SURPRISE_BOOST_THRESHOLD = float(args.cbo_radius_surprise_boost_threshold)
     CFG.CBO_RADIUS_BETA_BOOST = float(args.cbo_radius_beta_boost)
     CFG.CBO_RADIUS_BETA_CAP = float(args.cbo_radius_beta_cap)
+    CFG.CBO_GOOD_REGION_GUARD = str(args.cbo_good_region_guard)
+    CFG.CBO_GOOD_REGION_WINDOW = int(args.cbo_good_region_window)
+    CFG.CBO_GOOD_REGION_WORSE_PCT = float(args.cbo_good_region_worse_pct)
+    CFG.CBO_GOOD_REGION_DISTANCE_THRESHOLD = float(args.cbo_good_region_distance_threshold)
+    CFG.CBO_GOOD_REGION_TR_RADIUS_THRESHOLD = float(args.cbo_good_region_tr_radius_threshold)
+    CFG.CBO_GOOD_REGION_BETA_THRESHOLD = float(args.cbo_good_region_beta_threshold)
+    CFG.CBO_GOOD_REGION_GUARD_MODE = str(args.cbo_good_region_guard_mode)
     CFG.CBO_SERVICE_GUARD_MODE = str(args.cbo_service_guard_mode)
     CFG.CBO_SERVICE_GUARD_DELAY_PCT = float(args.cbo_service_guard_delay_pct)
     CFG.CBO_SERVICE_GUARD_BACKLOG_PCT = float(args.cbo_service_guard_backlog_pct)

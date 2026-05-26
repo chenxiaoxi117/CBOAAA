@@ -59,6 +59,8 @@ def method_deploy_policy_map(groups):
             "deploy_policy_source": group_cfg.get("deploy_policy_source", "method_default"),
             "method_family": group_cfg.get("method_family"),
             "is_cbo_method": bool(_is_cbo_method_key(group_key, group_cfg)),
+            "alpha_direct_fixed_theta_enabled": bool(group_cfg.get("alpha_direct_fixed_theta_enabled", False)),
+            "alpha_direct_fixed_theta_6d": group_cfg.get("alpha_direct_fixed_theta_6d"),
         }
     return out
 
@@ -168,6 +170,13 @@ def apply_cbo_stability_policy_override(groups):
         "cbo_radius_surprise_boost_threshold": _cbo_cli_option("--cbo-radius-surprise-boost-threshold", "CBO_RADIUS_SURPRISE_BOOST_THRESHOLD", 2.0),
         "cbo_radius_beta_boost": _cbo_cli_option("--cbo-radius-beta-boost", "CBO_RADIUS_BETA_BOOST", 1.5),
         "cbo_radius_beta_cap": _cbo_cli_option("--cbo-radius-beta-cap", "CBO_RADIUS_BETA_CAP", 3.0),
+        "cbo_good_region_guard": _cbo_cli_option("--cbo-good-region-guard", "CBO_GOOD_REGION_GUARD", "off"),
+        "cbo_good_region_window": _cbo_cli_option("--cbo-good-region-window", "CBO_GOOD_REGION_WINDOW", 50),
+        "cbo_good_region_worse_pct": _cbo_cli_option("--cbo-good-region-worse-pct", "CBO_GOOD_REGION_WORSE_PCT", 0.03),
+        "cbo_good_region_distance_threshold": _cbo_cli_option("--cbo-good-region-distance-threshold", "CBO_GOOD_REGION_DISTANCE_THRESHOLD", 0.35),
+        "cbo_good_region_tr_radius_threshold": _cbo_cli_option("--cbo-good-region-tr-radius-threshold", "CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15),
+        "cbo_good_region_beta_threshold": _cbo_cli_option("--cbo-good-region-beta-threshold", "CBO_GOOD_REGION_BETA_THRESHOLD", 0.5),
+        "cbo_good_region_guard_mode": _cbo_cli_option("--cbo-good-region-guard-mode", "CBO_GOOD_REGION_GUARD_MODE", "conservative"),
         "cbo_service_guard_mode": _cbo_cli_option("--cbo-service-guard-mode", "CBO_SERVICE_GUARD_MODE", "off"),
         "cbo_service_guard_delay_pct": _cbo_cli_option("--cbo-service-guard-delay-pct", "CBO_SERVICE_GUARD_DELAY_PCT", 0.03),
         "cbo_service_guard_backlog_pct": _cbo_cli_option("--cbo-service-guard-backlog-pct", "CBO_SERVICE_GUARD_BACKLOG_PCT", 0.03),
@@ -203,6 +212,34 @@ def apply_cbo_stability_policy_override(groups):
     return groups
 
 
+def apply_alpha_direct_fixed_theta_override(groups):
+    theta = getattr(CFG, "ALPHA_DIRECT_FIXED_THETA", None)
+    if theta is None:
+        return groups
+    if not isinstance(theta, (list, tuple, np.ndarray)) or len(theta) != 6:
+        raise ValueError("ALPHA_DIRECT_FIXED_THETA must be a 6D sequence")
+    clip_fn = globals().get("clip_alpha_direct_control_vector")
+    theta6 = clip_fn(theta) if callable(clip_fn) else [float(x) for x in theta]
+    theta6 = [float(x) for x in list(theta6)[:6]]
+    alpha_direct_keys = {"reduced6_cbo_alpha_direct", "reduced6_cbo_alpha_direct_no_risk"}
+    for group_key, group_cfg in (groups or {}).items():
+        if str(group_key) not in alpha_direct_keys:
+            group_cfg.setdefault("alpha_direct_fixed_theta_enabled", False)
+            group_cfg.setdefault("alpha_direct_fixed_theta_6d", None)
+            continue
+        if str(group_cfg.get("control_mode", "")).strip().lower() != "alpha_direct":
+            continue
+        group_cfg["agent"] = None
+        group_cfg["agent_kwargs"] = None
+        group_cfg["fixed_theta"] = list(theta6)
+        group_cfg["deploy_policy"] = "fixed"
+        group_cfg["deploy_policy_source"] = "alpha_direct_fixed_theta_cli"
+        group_cfg["scheduler_tradeoff_mode"] = "alpha_direct"
+        group_cfg["alpha_direct_fixed_theta_enabled"] = True
+        group_cfg["alpha_direct_fixed_theta_6d"] = list(theta6)
+    return groups
+
+
 def method_history_policy_map(groups):
     out = {}
     for group_key, group_cfg in (groups or {}).items():
@@ -221,9 +258,11 @@ def method_history_policy_map(groups):
             "robust_score_mode": group_cfg.get("cbo_robust_score_mode", _cfg_cbo_str("CBO_ROBUST_SCORE_MODE", "none")),
             "scheduler_tradeoff_mode": str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy")),
             "scheduler_score_norm_mode": str(getattr(CFG, "SCHEDULER_SCORE_NORM_MODE", "legacy")),
+            "scheduler_use_score_risk": group_cfg.get("scheduler_use_score_risk", bool(getattr(CFG, "USE_SCORE_RISK", True))),
             "scheduler_tradeoff_alpha": float(getattr(CFG, "SCHEDULER_TRADEOFF_ALPHA", 0.85)),
             "scheduler_alpha_min": float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)),
             "scheduler_alpha_max": float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97)),
+            "scheduler_le_scale": float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)),
             "alpha_direct_bounds": getattr(CFG, "ALPHA_DIRECT_BOUNDS", None),
             "alpha_direct_rt_bounds": getattr(CFG, "ALPHA_DIRECT_RT_BOUNDS", None),
             "alpha_direct_batch_bounds": getattr(CFG, "ALPHA_DIRECT_BATCH_BOUNDS", None),
@@ -257,6 +296,13 @@ def method_history_policy_map(groups):
             "beta_min": group_cfg.get("cbo_beta_min", _cfg_cbo_float("CBO_BETA_MIN", 0.1)),
             "beta_max": group_cfg.get("cbo_beta_max", _cfg_cbo_float("CBO_BETA_MAX", 2.0)),
             "radius_beta_power": group_cfg.get("cbo_radius_beta_power", _cfg_cbo_float("CBO_RADIUS_BETA_POWER", 1.0)),
+            "good_region_guard": group_cfg.get("cbo_good_region_guard", _cfg_cbo_str("CBO_GOOD_REGION_GUARD", "off")),
+            "good_region_window": group_cfg.get("cbo_good_region_window", _cfg_cbo_int("CBO_GOOD_REGION_WINDOW", 50)),
+            "good_region_worse_pct": group_cfg.get("cbo_good_region_worse_pct", _cfg_cbo_float("CBO_GOOD_REGION_WORSE_PCT", 0.03)),
+            "good_region_distance_threshold": group_cfg.get("cbo_good_region_distance_threshold", _cfg_cbo_float("CBO_GOOD_REGION_DISTANCE_THRESHOLD", 0.35)),
+            "good_region_tr_radius_threshold": group_cfg.get("cbo_good_region_tr_radius_threshold", _cfg_cbo_float("CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15)),
+            "good_region_beta_threshold": group_cfg.get("cbo_good_region_beta_threshold", _cfg_cbo_float("CBO_GOOD_REGION_BETA_THRESHOLD", 0.5)),
+            "good_region_guard_mode": group_cfg.get("cbo_good_region_guard_mode", _cfg_cbo_str("CBO_GOOD_REGION_GUARD_MODE", "conservative")),
             "radius_stable_rebound_pct": group_cfg.get("cbo_radius_stable_rebound_pct", _cfg_cbo_float("CBO_RADIUS_STABLE_REBOUND_PCT", 0.02)),
             "radius_unstable_rebound_pct": group_cfg.get("cbo_radius_unstable_rebound_pct", _cfg_cbo_float("CBO_RADIUS_UNSTABLE_REBOUND_PCT", 0.04)),
             "radius_surprise_boost_threshold": group_cfg.get("cbo_radius_surprise_boost_threshold", _cfg_cbo_float("CBO_RADIUS_SURPRISE_BOOST_THRESHOLD", 2.0)),
@@ -1751,10 +1797,13 @@ LITE_CONTEXT_FEATURE_NAMES = [
     "prev_rt_arrival_ratio",        # 12
     "prev_batch_arrival_ratio",     # 13
     "prev_ai_arrival_ratio",        # 14
+    "prev_unfinished_rate",         # 15
+    "recent_unfinished_rate_mean",  # 16
+    "unfinished_rate_trend",        # 17
 ]
 LITE_CONTEXT_BOUNDS = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
 ]
 
 # v6.1: CBO-lite context 消融配置。
@@ -1790,6 +1839,14 @@ LITE_CONTEXT_MODE_SPECS = {
     "pressure_taskmix_counts": {"label": "pressure_taskmix_counts", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]},
     "pressure_task_mix_counts": {"label": "pressure_taskmix_counts", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]},
     "ptc": {"label": "pressure_taskmix_counts", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]},
+    "pressure_prev_unfinished_context": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
+    "pressure_taskmix_counts_prev_unfinished": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
+    "prev_unfinished_context": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
+    "puc_prev": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
+    "pressure_unfinished_context": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
+    "pressure_taskmix_counts_unfinished": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
+    "unfinished_context": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
+    "puc": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
 
     # 新增：全量扩展 context。维度高，只建议小规模对照。
     "full_taskmix": {"label": "full_taskmix", "indices": [0, 1, 2, 3, 4, 5, 6, 7, 8]},
@@ -1805,6 +1862,17 @@ def _lite_context_indices(context_mode="lite"):
 
 def lite_context_feature_names(context_mode="lite"):
     return [LITE_CONTEXT_FEATURE_NAMES[i] for i in _lite_context_indices(context_mode)]
+
+
+PRESSURE_UNFINISHED_CONTEXT_NAMES = [
+    LITE_CONTEXT_FEATURE_NAMES[i]
+    for i in [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]
+]
+
+PRESSURE_PREV_UNFINISHED_CONTEXT_NAMES = [
+    LITE_CONTEXT_FEATURE_NAMES[i]
+    for i in [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]
+]
 
 
 def lite_context_bounds(context_mode="lite"):
@@ -1899,6 +1967,59 @@ def _last_perf_value(fac, key, default=0.0):
     return float(default)
 
 
+def _finite_float(v, default=np.nan):
+    try:
+        x = float(v)
+        return x if np.isfinite(x) else default
+    except Exception:
+        return default
+
+
+def _perf_float_series(fac, key):
+    try:
+        vals = list(getattr(fac, "perf_log", {}).get(key, []) or [])
+    except Exception:
+        vals = []
+    return [_finite_float(v, np.nan) for v in vals]
+
+
+def _unfinished_rate_history(fac):
+    unfinished_vals = _perf_float_series(fac, "unfinished_end")
+    if not unfinished_vals:
+        unfinished_vals = _perf_float_series(fac, "backlog")
+    arrival_vals = _perf_float_series(fac, "arrivals_total")
+    n = min(len(unfinished_vals), len(arrival_vals))
+    rates = []
+    for unfinished, arrivals in zip(unfinished_vals[-n:], arrival_vals[-n:]):
+        if not np.isfinite(unfinished) or not np.isfinite(arrivals):
+            continue
+        rate = max(0.0, float(unfinished)) / max(float(arrivals), 1.0)
+        rates.append(float(np.clip(rate, 0.0, 1.0)))
+    return rates
+
+
+def _mean_or_zero(vals):
+    arr = np.array([float(v) for v in vals if np.isfinite(float(v))], dtype=float)
+    return float(np.mean(arr)) if arr.size else 0.0
+
+
+def _unfinished_context_features(fac):
+    rates = _unfinished_rate_history(fac)
+    hist_n = len(rates)
+    if hist_n <= 0:
+        return 0.0, 0.0, 0.0, "insufficient_history:no_previous_window"
+    prev_rate = float(np.clip(rates[-1], 0.0, 1.0))
+    recent_mean = float(np.clip(_mean_or_zero(rates[-20:]), 0.0, 1.0))
+    older = rates[:-10][-30:] if hist_n > 10 else []
+    if older:
+        trend = _mean_or_zero(rates[-10:]) - _mean_or_zero(older)
+        status = "ok" if hist_n >= 40 else "insufficient_history:older_window"
+    else:
+        trend = 0.0
+        status = "insufficient_history:older_window"
+    return prev_rate, recent_mean, float(np.clip(trend, -1.0, 1.0)), status
+
+
 def build_lite_context_vector(fac, base_context=None):
     """构造 CBO-lite 的窗口开始状态。
 
@@ -1956,6 +2077,12 @@ def build_lite_context_vector(fac, base_context=None):
         prev_batch_ratio = cfg_batch
         prev_ai_ratio = cfg_ai
 
+    prev_unfinished_rate, recent_unfinished_rate_mean, unfinished_rate_trend, unfinished_status = _unfinished_context_features(fac)
+    try:
+        fac._last_unfinished_context_status = unfinished_status
+    except Exception:
+        pass
+
     return [
         float(np.clip(arrival_rate, 0.0, 5.0)),
         float(np.clip(backlog, 0.0, 500.0)),
@@ -1972,6 +2099,9 @@ def build_lite_context_vector(fac, base_context=None):
         float(np.clip(prev_rt_ratio, 0.0, 1.0)),
         float(np.clip(prev_batch_ratio, 0.0, 1.0)),
         float(np.clip(prev_ai_ratio, 0.0, 1.0)),
+        prev_unfinished_rate,
+        recent_unfinished_rate_mean,
+        unfinished_rate_trend,
     ]
 
 
@@ -1981,7 +2111,21 @@ def build_context_for_group(fac, group_cfg, base_context=None):
         full_vec = build_lite_context_vector(fac, base_context=base_context)
         if mode in {"state_lite", "cbo_lite"}:
             mode = "lite"
-        return slice_lite_context_vector(full_vec, context_mode=mode)
+        ctx = slice_lite_context_vector(full_vec, context_mode=mode)
+        try:
+            label = str(LITE_CONTEXT_MODE_SPECS.get(mode, {}).get("label", mode))
+            fac._last_context_mode = label
+            fac._last_context_feature_names = lite_context_feature_names(mode)
+            fac._last_context_status = getattr(fac, "_last_unfinished_context_status", "ok") if "unfinished" in label else "ok"
+        except Exception:
+            pass
+        return ctx
+    try:
+        fac._last_context_mode = str(mode)
+        fac._last_context_feature_names = list(getattr(CFG, "CONTEXT_FEATURE_NAMES", []))
+        fac._last_context_status = "legacy"
+    except Exception:
+        pass
     return base_context
 
 
@@ -2104,6 +2248,13 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_beta_min = float(group_cfg.get("cbo_beta_min", _cfg_cbo_float("CBO_BETA_MIN", 0.1)))
     agent.cbo_beta_max = float(group_cfg.get("cbo_beta_max", _cfg_cbo_float("CBO_BETA_MAX", 2.0)))
     agent.cbo_radius_beta_power = float(group_cfg.get("cbo_radius_beta_power", _cfg_cbo_float("CBO_RADIUS_BETA_POWER", 1.0)))
+    agent.cbo_good_region_guard = str(group_cfg.get("cbo_good_region_guard", _cfg_cbo_str("CBO_GOOD_REGION_GUARD", "off"))).strip().lower()
+    agent.cbo_good_region_window = int(group_cfg.get("cbo_good_region_window", _cfg_cbo_int("CBO_GOOD_REGION_WINDOW", 50)))
+    agent.cbo_good_region_worse_pct = float(group_cfg.get("cbo_good_region_worse_pct", _cfg_cbo_float("CBO_GOOD_REGION_WORSE_PCT", 0.03)))
+    agent.cbo_good_region_distance_threshold = float(group_cfg.get("cbo_good_region_distance_threshold", _cfg_cbo_float("CBO_GOOD_REGION_DISTANCE_THRESHOLD", 0.35)))
+    agent.cbo_good_region_tr_radius_threshold = float(group_cfg.get("cbo_good_region_tr_radius_threshold", _cfg_cbo_float("CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15)))
+    agent.cbo_good_region_beta_threshold = float(group_cfg.get("cbo_good_region_beta_threshold", _cfg_cbo_float("CBO_GOOD_REGION_BETA_THRESHOLD", 0.5)))
+    agent.cbo_good_region_guard_mode = str(group_cfg.get("cbo_good_region_guard_mode", _cfg_cbo_str("CBO_GOOD_REGION_GUARD_MODE", "conservative"))).strip().lower()
     agent.cbo_radius_stable_rebound_pct = float(group_cfg.get("cbo_radius_stable_rebound_pct", _cfg_cbo_float("CBO_RADIUS_STABLE_REBOUND_PCT", 0.02)))
     agent.cbo_radius_unstable_rebound_pct = float(group_cfg.get("cbo_radius_unstable_rebound_pct", _cfg_cbo_float("CBO_RADIUS_UNSTABLE_REBOUND_PCT", 0.04)))
     agent.cbo_radius_surprise_boost_threshold = float(group_cfg.get("cbo_radius_surprise_boost_threshold", _cfg_cbo_float("CBO_RADIUS_SURPRISE_BOOST_THRESHOLD", 2.0)))
@@ -3187,9 +3338,114 @@ def _cbo_service_guard_apply(agent, score):
     return score - penalty, penalty, info
 
 
+def _cbo_good_region_recent_mean(agent, window):
+    costs = []
+    for v in list(getattr(agent, "cbo_eval_cost_history", []) or []):
+        fv = _safe_float(v, np.nan)
+        if np.isfinite(fv):
+            costs.append(float(fv))
+    if len(costs) < max(1, int(window)):
+        return np.nan
+    return float(np.mean(costs[-max(1, int(window)):]))
+
+
+def _cbo_good_region_guard_enabled(agent, group_cfg):
+    if agent is None or not isinstance(group_cfg, dict):
+        return False
+    if str(group_cfg.get("control_mode", "")).strip().lower() != "alpha_direct":
+        return False
+    val = group_cfg.get("cbo_good_region_guard", getattr(agent, "cbo_good_region_guard", _cfg_cbo_str("CBO_GOOD_REGION_GUARD", "off")))
+    return str(val or "off").strip().lower() in {"on", "true", "1", "yes", "enabled"}
+
+
+def _alpha_direct_expanded_6d(theta, group_cfg=None):
+    expand_fn = globals().get("expand_alpha_direct_control_vector")
+    if callable(expand_fn):
+        try:
+            return list(expand_fn(theta, group_cfg=group_cfg))
+        except TypeError:
+            return list(expand_fn(theta))
+        except Exception:
+            pass
+    clip_fn = globals().get("clip_alpha_direct_control_vector")
+    return list(clip_fn(theta)) if callable(clip_fn) else list(theta)
+
+
+def _cbo_apply_good_region_deployment_guard(agent, candidate_theta, safe_info, group_cfg):
+    """Optionally deploy the best rolling good-region theta instead of a risky alpha_direct candidate."""
+    candidate_theta = list(candidate_theta) if candidate_theta is not None else None
+    enabled = _cbo_good_region_guard_enabled(agent, group_cfg)
+    window = max(1, int(group_cfg.get("cbo_good_region_window", getattr(agent, "cbo_good_region_window", _cfg_cbo_int("CBO_GOOD_REGION_WINDOW", 50)))))
+    mode = str(group_cfg.get("cbo_good_region_guard_mode", getattr(agent, "cbo_good_region_guard_mode", _cfg_cbo_str("CBO_GOOD_REGION_GUARD_MODE", "conservative"))) or "conservative").strip().lower()
+    if mode not in {"conservative", "distance_only", "performance_only"}:
+        mode = "conservative"
+    good_theta = getattr(agent, "good_region_anchor_theta", None)
+    good_cost = getattr(agent, "good_region_best_rolling50_cost", None)
+    available = bool(good_theta is not None and good_cost is not None and np.isfinite(float(good_cost)))
+    distance = _cbo_theta_distance(agent, candidate_theta, good_theta) if available else np.nan
+    recent_mean = _cbo_good_region_recent_mean(agent, window)
+    worse_pct = np.nan
+    if available and np.isfinite(recent_mean) and abs(float(good_cost)) > 1e-12:
+        worse_pct = (float(recent_mean) - float(good_cost)) / abs(float(good_cost))
+    tr_radius = safe_info.get("cbo_tr_radius_after_update", safe_info.get("cbo_tr_radius", getattr(agent, "trust_radius", np.nan)))
+    beta_eff = safe_info.get("beta_eff", safe_info.get("selected_candidate_beta_eff", getattr(agent, "cbo_last_beta_eff", np.nan)))
+    tr_radius_f = _safe_float(tr_radius, np.nan)
+    beta_eff_f = _safe_float(beta_eff, np.nan)
+    selected_source = str(safe_info.get("selected_candidate_source", safe_info.get("selected_source", "")) or "")
+    distance_threshold = float(group_cfg.get("cbo_good_region_distance_threshold", getattr(agent, "cbo_good_region_distance_threshold", _cfg_cbo_float("CBO_GOOD_REGION_DISTANCE_THRESHOLD", 0.35))))
+    worse_threshold = float(group_cfg.get("cbo_good_region_worse_pct", getattr(agent, "cbo_good_region_worse_pct", _cfg_cbo_float("CBO_GOOD_REGION_WORSE_PCT", 0.03))))
+    tr_threshold = float(group_cfg.get("cbo_good_region_tr_radius_threshold", getattr(agent, "cbo_good_region_tr_radius_threshold", _cfg_cbo_float("CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15))))
+    beta_threshold = float(group_cfg.get("cbo_good_region_beta_threshold", getattr(agent, "cbo_good_region_beta_threshold", _cfg_cbo_float("CBO_GOOD_REGION_BETA_THRESHOLD", 0.5))))
+
+    checks = []
+    if available and np.isfinite(distance) and distance > distance_threshold:
+        checks.append("distance")
+    if available and np.isfinite(worse_pct) and worse_pct > worse_threshold:
+        checks.append("rolling_worse")
+    if np.isfinite(tr_radius_f) and tr_radius_f > tr_threshold:
+        checks.append("tr_radius")
+    if np.isfinite(beta_eff_f) and beta_eff_f > beta_threshold:
+        checks.append("beta_eff")
+    if available and selected_source == "global_random" and np.isfinite(distance) and distance > distance_threshold:
+        checks.append("global_random_far")
+
+    if mode == "distance_only":
+        active_checks = [c for c in checks if c in {"distance", "global_random_far"}]
+    elif mode == "performance_only":
+        active_checks = [c for c in checks if c in {"rolling_worse", "tr_radius", "beta_eff"}]
+    else:
+        active_checks = checks
+
+    triggered = bool(enabled and available and active_checks)
+    deployed_theta = list(good_theta) if triggered else list(candidate_theta)
+    candidate_theta_6d = _alpha_direct_expanded_6d(candidate_theta, group_cfg) if candidate_theta is not None else None
+    deployed_theta_6d = _alpha_direct_expanded_6d(deployed_theta, group_cfg) if deployed_theta is not None else None
+    good_theta_6d = _alpha_direct_expanded_6d(good_theta, group_cfg) if good_theta is not None else None
+    guard_info = {
+        "good_region_guard_enabled": int(enabled),
+        "good_region_guard_triggered": int(triggered),
+        "good_region_guard_reason": "+".join(active_checks) if triggered else ("no_good_region" if enabled and not available else "pass"),
+        "candidate_theta_6d": candidate_theta_6d,
+        "deployed_theta_6d": deployed_theta_6d,
+        "good_region_theta_6d": good_theta_6d,
+        "good_region_cost": float(good_cost) if available else np.nan,
+        "good_region_iter": getattr(agent, "good_region_best_iter", None),
+        "good_region_window_start": getattr(agent, "good_region_window_start", None),
+        "good_region_window_end": getattr(agent, "good_region_window_end", None),
+        "distance_to_good_region": float(distance) if np.isfinite(distance) else np.nan,
+        "candidate_selected_source": selected_source or None,
+        "deployed_source": "good_region_guard" if triggered else (selected_source or safe_info.get("deploy_source")),
+        "candidate_tr_radius": float(tr_radius_f) if np.isfinite(tr_radius_f) else np.nan,
+        "candidate_beta_eff": float(beta_eff_f) if np.isfinite(beta_eff_f) else np.nan,
+        "guard_fallback_type": "good_region" if triggered else "none",
+    }
+    return deployed_theta, guard_info
+
+
 def _cbo_update_good_region_memory(agent, iteration, theta, eval_cost, safe_info):
     if agent is None:
         return safe_info
+    window = max(1, int(getattr(agent, "cbo_good_region_window", _cfg_cbo_int("CBO_GOOD_REGION_WINDOW", 50))))
     costs = list(getattr(agent, "cbo_eval_cost_history", []) or [])
     try:
         costs.append(float(eval_cost))
@@ -3197,8 +3453,8 @@ def _cbo_update_good_region_memory(agent, iteration, theta, eval_cost, safe_info
         costs.append(np.nan)
     agent.cbo_eval_cost_history = costs
     rolling = np.nan
-    if len(costs) >= 50:
-        recent = np.asarray(costs[-50:], dtype=float)
+    if len(costs) >= window:
+        recent = np.asarray(costs[-window:], dtype=float)
         if np.isfinite(recent).all():
             rolling = float(np.mean(recent))
             best = getattr(agent, "good_region_best_rolling50_cost", None)
@@ -3206,7 +3462,9 @@ def _cbo_update_good_region_memory(agent, iteration, theta, eval_cost, safe_info
                 agent.good_region_best_iter = int(iteration)
                 agent.good_region_best_rolling50_cost = float(rolling)
                 agent.good_region_anchor_theta = list(theta) if theta is not None else None
-                agent.good_region_anchor_source = str(safe_info.get("selected_candidate_source", safe_info.get("deploy_source", "selected_theta")))
+                agent.good_region_anchor_source = str(safe_info.get("deployed_source", safe_info.get("selected_candidate_source", safe_info.get("deploy_source", "selected_theta"))))
+                agent.good_region_window_start = int(iteration) - window + 1
+                agent.good_region_window_end = int(iteration)
     best_cost = getattr(agent, "good_region_best_rolling50_cost", None)
     anchor = getattr(agent, "good_region_anchor_theta", None)
     available = bool(anchor is not None and best_cost is not None and np.isfinite(float(best_cost)))
@@ -3222,7 +3480,13 @@ def _cbo_update_good_region_memory(agent, iteration, theta, eval_cost, safe_info
         "good_region_best_rolling50_cost": float(best_cost) if available else np.nan,
         "good_region_anchor_theta": list(anchor) if anchor is not None else None,
         "good_region_anchor_source": getattr(agent, "good_region_anchor_source", None),
+        "good_region_cost": float(best_cost) if available else np.nan,
+        "good_region_theta_6d": list(anchor) if anchor is not None else None,
+        "good_region_iter": getattr(agent, "good_region_best_iter", None),
+        "good_region_window_start": getattr(agent, "good_region_window_start", None),
+        "good_region_window_end": getattr(agent, "good_region_window_end", None),
         "distance_to_good_region_anchor": _cbo_theta_distance(agent, theta, anchor),
+        "distance_to_good_region": _cbo_theta_distance(agent, theta, anchor),
         "current_vs_good_region_gap_pct": float(gap) if np.isfinite(gap) else np.nan,
     })
     return safe_info
@@ -3566,6 +3830,29 @@ USER_METHOD_ALIASES = {
     "cbo_alpha_direct": "reduced6_cbo_alpha_direct",
     "alpha-direct": "reduced6_cbo_alpha_direct",
     "alpha_direct": "reduced6_cbo_alpha_direct",
+    "cbo-alpha-direct-no-risk": "reduced6_cbo_alpha_direct_no_risk",
+    "cbo_alpha_direct_no_risk": "reduced6_cbo_alpha_direct_no_risk",
+    "alpha-direct-no-risk": "reduced6_cbo_alpha_direct_no_risk",
+    "alpha_direct_no_risk": "reduced6_cbo_alpha_direct_no_risk",
+    "ad-no-risk": "reduced6_cbo_alpha_direct_no_risk",
+    "cbo-alpha-direct-unfinished-context": "reduced6_cbo_alpha_direct_unfinished_context",
+    "cbo_alpha_direct_unfinished_context": "reduced6_cbo_alpha_direct_unfinished_context",
+    "alpha-direct-unfinished-context": "reduced6_cbo_alpha_direct_unfinished_context",
+    "alpha_direct_unfinished_context": "reduced6_cbo_alpha_direct_unfinished_context",
+    "ad-unfinished-context": "reduced6_cbo_alpha_direct_unfinished_context",
+    "ad_unfinished_context": "reduced6_cbo_alpha_direct_unfinished_context",
+    "cbo-alpha-direct-prev-unfinished-context": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "cbo_alpha_direct_prev_unfinished_context": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "alpha-direct-prev-unfinished-context": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "alpha_direct_prev_unfinished_context": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "ad-prev-unfinished-context": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "ad_prev_unfinished_context": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "cbo-alpha-direct-prev-unfinished": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "ad-prev-unfinished": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "cbo-alpha-direct-prev-unfinished-risk0": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "cbo_alpha_direct_prev_unfinished_risk0": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "alpha-direct-prev-unfinished-risk0": "reduced6_cbo_alpha_direct_prev_unfinished_context",
+    "ad-prev-unfinished-risk0": "reduced6_cbo_alpha_direct_prev_unfinished_context",
     "cbo-full-taskmix": "reduced6_cbo_lite_full_taskmix",
     "cbo_full_taskmix": "reduced6_cbo_lite_full_taskmix",
     "cbo-full-taskmix-counts": "reduced6_cbo_lite_full_taskmix_counts",
@@ -3752,6 +4039,10 @@ def run_scenario_group(seed, group_key, group_cfg):
     method_scheduler_tradeoff_mode = group_cfg.get("scheduler_tradeoff_mode")
     if method_scheduler_tradeoff_mode:
         CFG.SCHEDULER_TRADEOFF_MODE = str(method_scheduler_tradeoff_mode)
+    old_use_score_risk = bool(getattr(CFG, "USE_SCORE_RISK", True))
+    method_use_score_risk = group_cfg.get("scheduler_use_score_risk", None)
+    if method_use_score_risk is not None:
+        CFG.USE_SCORE_RISK = bool(method_use_score_risk)
     # v6.2 runtime logging: per-method and per-iteration elapsed time.
     runtime_group_t0 = time.perf_counter()
     runtime_group_wall_t0 = time.time()
@@ -3775,6 +4066,8 @@ def run_scenario_group(seed, group_key, group_cfg):
         f"alpha={getattr(CFG, 'SCHEDULER_TRADEOFF_ALPHA', 0.85)} "
         f"alpha_min={getattr(CFG, 'SCHEDULER_ALPHA_MIN', 0.60)} "
         f"alpha_max={getattr(CFG, 'SCHEDULER_ALPHA_MAX', 0.97)} "
+        f"le_scale={getattr(CFG, 'SCHEDULER_LE_SCALE', 1.0)} "
+        f"use_score_risk={getattr(CFG, 'USE_SCORE_RISK', True)} "
         f"service_latency_weight={getattr(CFG, 'SCHEDULER_SERVICE_LATENCY_WEIGHT', 1.0)} "
         f"service_risk_weight={getattr(CFG, 'SCHEDULER_SERVICE_RISK_WEIGHT', 1.0)} "
         f"service_queue_weight={getattr(CFG, 'SCHEDULER_SERVICE_QUEUE_WEIGHT', 1.0)} "
@@ -3850,6 +4143,38 @@ def run_scenario_group(seed, group_key, group_cfg):
                 if ((i + 1) % every == 0) or ((i + 1) == int(CFG.BO_ITERATIONS)):
                     _cbo_dump_candidate_diagnostics(SCENARIO_SAVE_DIR, i + 1, safe_info, group_key=group_key)
 
+        candidate_theta_control = list(theta_control)
+        deployed_theta_control = list(theta_control)
+        candidate_theta_6d = _alpha_direct_expanded_6d(candidate_theta_control, group_cfg) if group_cfg.get("control_mode") == "alpha_direct" else None
+        deployed_theta_6d = _alpha_direct_expanded_6d(deployed_theta_control, group_cfg) if group_cfg.get("control_mode") == "alpha_direct" else None
+        alpha_direct_fixed_enabled = bool(group_cfg.get("alpha_direct_fixed_theta_enabled", False))
+        alpha_direct_fixed_theta_6d = group_cfg.get("alpha_direct_fixed_theta_6d")
+        guard_info = {
+            "good_region_guard_enabled": int(False),
+            "good_region_guard_triggered": int(False),
+            "good_region_guard_reason": "off",
+            "candidate_theta_6d": candidate_theta_6d,
+            "deployed_theta_6d": deployed_theta_6d,
+            "good_region_theta_6d": None,
+            "good_region_cost": np.nan,
+            "good_region_iter": None,
+            "good_region_window_start": None,
+            "good_region_window_end": None,
+            "distance_to_good_region": np.nan,
+            "candidate_selected_source": safe_info.get("selected_candidate_source", safe_info.get("selected_source")),
+            "deployed_source": safe_info.get("selected_candidate_source", safe_info.get("deploy_source")),
+            "candidate_tr_radius": safe_info.get("cbo_tr_radius_after_update", safe_info.get("cbo_tr_radius")),
+            "candidate_beta_eff": safe_info.get("beta_eff", safe_info.get("selected_candidate_beta_eff")),
+            "guard_fallback_type": "none",
+            "alpha_direct_fixed_theta_enabled": int(alpha_direct_fixed_enabled),
+            "alpha_direct_fixed_theta_6d": list(alpha_direct_fixed_theta_6d) if alpha_direct_fixed_enabled and alpha_direct_fixed_theta_6d is not None else None,
+        }
+        if fac.agent is not None and _is_cbo_method_key(group_key, group_cfg):
+            deployed_theta_control, guard_info = _cbo_apply_good_region_deployment_guard(
+                fac.agent, candidate_theta_control, safe_info, group_cfg
+            )
+        theta_control = list(deployed_theta_control)
+        safe_info.update(guard_info)
         theta_full = map_group_theta_to_full(theta_control, group_cfg)
         paired_shadow = None
         paired_window_end = None
@@ -3889,6 +4214,7 @@ def run_scenario_group(seed, group_key, group_cfg):
         metrics["bo_training_feedback_score"] = str(train_feedback_mode)
         metrics["bo_training_feedback_note"] = str(train_feedback_note)
         safe_info["current_candidate_cost"] = float(metrics.get("cost", np.nan))
+        safe_info["current_deployed_cost"] = float(metrics.get("cost", np.nan))
         safe_info["current_train_cost"] = float(train_cost)
         safe_info["best_so_far_cost"] = -float(fac.agent.prev_best_value) if (fac.agent is not None and getattr(fac.agent, "prev_best_value", None) is not None) else safe_info.get("best_so_far_cost")
         safe_info["best_so_far_iter"] = getattr(fac.agent, "prev_best_iter", safe_info.get("best_so_far_iter")) if fac.agent is not None else safe_info.get("best_so_far_iter")
@@ -3981,6 +4307,12 @@ def run_scenario_group(seed, group_key, group_cfg):
             "good_region_available", "good_region_best_iter", "good_region_best_rolling50_cost",
             "good_region_anchor_theta", "good_region_anchor_source",
             "distance_to_good_region_anchor", "current_vs_good_region_gap_pct",
+            "good_region_guard_enabled", "good_region_guard_triggered", "good_region_guard_reason",
+            "candidate_theta_6d", "deployed_theta_6d", "good_region_theta_6d",
+            "good_region_cost", "good_region_iter", "good_region_window_start", "good_region_window_end",
+            "distance_to_good_region", "candidate_selected_source", "deployed_source",
+            "candidate_tr_radius", "candidate_beta_eff", "guard_fallback_type",
+            "alpha_direct_fixed_theta_enabled", "alpha_direct_fixed_theta_6d",
             "tr_update_mode", "tr_baseline_mean", "tr_current_mean", "tr_improve_pct",
             "tr_worse_pct", "tr_update_signal", "tr_update_patience_count",
             "cbo_tr_radius_before_update",
@@ -3997,9 +4329,9 @@ def run_scenario_group(seed, group_key, group_cfg):
         fac.perf_log.setdefault("theta_full_deployed", []).append(list(theta_full))
         fac.perf_log.setdefault("theta_full_feature_names", []).append(list(getattr(CFG, "FEATURE_NAMES", [])))
         fac.perf_log.setdefault("control_vector_meaning", []).append("deployed_full_theta")
+        fac.perf_log.setdefault("scheduler_use_score_risk", []).append(bool(getattr(CFG, "USE_SCORE_RISK", True)))
         if group_cfg.get("control_mode") == "alpha_direct":
-            clip_fn = globals().get("clip_alpha_direct_control_vector")
-            alpha_control = clip_fn(theta_control) if callable(clip_fn) else list(theta_control)
+            alpha_control = _alpha_direct_expanded_6d(theta_control, group_cfg)
             while len(alpha_control) < 6:
                 alpha_control.append(None)
             fac.perf_log.setdefault("alpha_direct_control_vector_6d", []).append(list(alpha_control[:6]))
@@ -4126,4 +4458,6 @@ def run_scenario_group(seed, group_key, group_cfg):
     fac.perf_log["cohort_feedback_debug_rows"] = list(getattr(fac, "cohort_feedback_rows", []))
     if method_scheduler_tradeoff_mode:
         CFG.SCHEDULER_TRADEOFF_MODE = old_scheduler_tradeoff_mode
+    if method_use_score_risk is not None:
+        CFG.USE_SCORE_RISK = old_use_score_risk
     return fac.perf_log

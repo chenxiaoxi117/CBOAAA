@@ -87,11 +87,13 @@ class ConnectedFactory:
             "feedback_mode": [], "cohort_id": [], "cohort_arrivals": [],
             "cohort_feedback_count": [], "cohort_feedback_cost_mean": [],
             "cohort_active_count": [], "cohort_finalized_total": [], "cohort_pending_tasks": [],
-            "scheduler_tradeoff_mode": [], "scheduler_score_norm_mode": [],
+            "scheduler_tradeoff_mode": [], "scheduler_score_norm_mode": [], "scheduler_le_scale": [],
             "scheduler_alpha_last": [], "scheduler_alpha_mean": [],
             "selected_service_component_last": [], "selected_energy_component_last": [],
             "selected_latency_component_last": [], "selected_risk_penalty_last": [],
             "selected_queue_penalty_last": [], "selected_latency_energy_component_last": [],
+            "selected_latency_energy_component_unscaled_last": [],
+            "selected_latency_energy_component_scaled_last": [],
             "selected_norm_e_last": [], "selected_norm_l_last": [],
             "selected_norm_risk_last": [], "selected_norm_queue_last": [],
             "selected_score_last": []
@@ -158,12 +160,20 @@ class ConnectedFactory:
         sched_debug = dict(getattr(self, "_last_window_scheduler_debug", {}) or {})
         self.perf_log.setdefault("scheduler_tradeoff_mode", []).append(sched_debug.get("scheduler_tradeoff_mode", getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy")))
         self.perf_log.setdefault("scheduler_score_norm_mode", []).append(sched_debug.get("scheduler_score_norm_mode", getattr(CFG, "SCHEDULER_SCORE_NORM_MODE", "legacy")))
+        scheduler_le_scale_default = (
+            float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0))
+            if str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy")).lower() == "alpha_direct"
+            else 1.0
+        )
+        self.perf_log.setdefault("scheduler_le_scale", []).append(sched_debug.get("scheduler_le_scale", scheduler_le_scale_default))
         self.perf_log.setdefault("scheduler_alpha_last", []).append(sched_debug.get("scheduler_alpha"))
         self.perf_log.setdefault("scheduler_alpha_mean", []).append(sched_debug.get("scheduler_alpha_mean", sched_debug.get("scheduler_alpha")))
         self.perf_log.setdefault("selected_latency_component_last", []).append(sched_debug.get("selected_latency_component"))
         self.perf_log.setdefault("selected_risk_penalty_last", []).append(sched_debug.get("selected_risk_penalty"))
         self.perf_log.setdefault("selected_queue_penalty_last", []).append(sched_debug.get("selected_queue_penalty"))
         self.perf_log.setdefault("selected_latency_energy_component_last", []).append(sched_debug.get("selected_latency_energy_component"))
+        self.perf_log.setdefault("selected_latency_energy_component_unscaled_last", []).append(sched_debug.get("selected_latency_energy_component_unscaled"))
+        self.perf_log.setdefault("selected_latency_energy_component_scaled_last", []).append(sched_debug.get("selected_latency_energy_component_scaled"))
         self.perf_log.setdefault("selected_service_component_last", []).append(sched_debug.get("selected_service_component"))  # Deprecated alias.
         self.perf_log.setdefault("selected_energy_component_last", []).append(sched_debug.get("selected_energy_component"))
         self.perf_log.setdefault("selected_norm_e_last", []).append(sched_debug.get("selected_norm_e"))
@@ -171,6 +181,15 @@ class ConnectedFactory:
         self.perf_log.setdefault("selected_norm_risk_last", []).append(sched_debug.get("selected_norm_risk"))
         self.perf_log.setdefault("selected_norm_queue_last", []).append(sched_debug.get("selected_norm_queue"))
         self.perf_log.setdefault("selected_score_last", []).append(sched_debug.get("selected_score"))
+        self.perf_log.setdefault("scheduler_score_min_last", []).append(sched_debug.get("score_min"))
+        self.perf_log.setdefault("scheduler_score_max_last", []).append(sched_debug.get("score_max"))
+        self.perf_log.setdefault("scheduler_score_gap_best_2nd_last", []).append(sched_debug.get("score_gap_best_2nd"))
+        self.perf_log.setdefault("scheduler_score_gap_min_max_last", []).append(sched_debug.get("score_gap_min_max"))
+        self.perf_log.setdefault("boltzmann_top1_prob_last", []).append(sched_debug.get("boltzmann_top1_prob"))
+        self.perf_log.setdefault("boltzmann_selected_prob_last", []).append(sched_debug.get("boltzmann_selected_prob"))
+        self.perf_log.setdefault("boltzmann_entropy_last", []).append(sched_debug.get("boltzmann_entropy"))
+        self.perf_log.setdefault("boltzmann_entropy_norm_last", []).append(sched_debug.get("boltzmann_entropy_norm"))
+        self.perf_log.setdefault("opportunity_candidate_count_last", []).append(sched_debug.get("opportunity_candidate_count"))
         self.perf_log.setdefault("arrivals_total", []).append(metrics.get("arrivals_total", 0))
         self.perf_log.setdefault("arrivals_rt", []).append(metrics.get("arrivals_rt", 0))
         self.perf_log.setdefault("arrivals_batch", []).append(metrics.get("arrivals_batch", 0))
@@ -200,6 +219,9 @@ class ConnectedFactory:
         self.perf_log.setdefault("window_ai_class_cost", []).append(metrics.get("window_ai_class_cost"))
         self.perf_log.setdefault("context_vector", []).append(list(context_vec) if context_vec is not None else [])
         self.perf_log.setdefault("context_label", []).append(str(state) if state is not None else "None")
+        self.perf_log.setdefault("context_mode", []).append(getattr(self, "_last_context_mode", None))
+        self.perf_log.setdefault("context_feature_names", []).append(list(getattr(self, "_last_context_feature_names", [])))
+        self.perf_log.setdefault("context_status", []).append(getattr(self, "_last_context_status", None))
         self.perf_log.setdefault("feedback_mode", []).append(metrics.get("feedback_mode", getattr(CFG, "FEEDBACK_MODE", "window")))
         self.perf_log.setdefault("cohort_id", []).append(metrics.get("cohort_id"))
         self.perf_log.setdefault("cohort_arrivals", []).append(metrics.get("cohort_arrivals", 0))

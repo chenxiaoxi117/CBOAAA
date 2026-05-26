@@ -261,6 +261,51 @@ def build_scenario_method_groups():
             "confidence_min_samples": 12,
             "agent_kwargs": alpha_direct_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="none", context_mode="pressure_taskmix_counts"),
         },
+        "reduced6_cbo_alpha_direct_no_risk": {
+            "label": "Reduced6 CBO Alpha-Direct No-Risk",
+            "norm_mode": "fixed",
+            "control_mode": "alpha_direct",
+            "scheduler_tradeoff_mode": "alpha_direct",
+            "scheduler_use_score_risk": False,
+            "deploy_policy": "greedy",
+            "method_family": "cbo_alpha_direct_no_risk",
+            "context_mode": "pressure_taskmix_counts",
+            "history_mode": "recent_confidence",
+            "recent_window": 80,
+            "confidence_min": 0.35,
+            "confidence_min_samples": 12,
+            "agent_kwargs": alpha_direct_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="none", context_mode="pressure_taskmix_counts"),
+        },
+        "reduced6_cbo_alpha_direct_unfinished_context": {
+            "label": "Reduced6 CBO Alpha-Direct Unfinished Context",
+            "norm_mode": "fixed",
+            "control_mode": "alpha_direct",
+            "scheduler_tradeoff_mode": "alpha_direct",
+            "deploy_policy": "greedy",
+            "method_family": "cbo_alpha_direct_unfinished_context",
+            "context_mode": "pressure_unfinished_context",
+            "history_mode": "recent_confidence",
+            "recent_window": 80,
+            "confidence_min": 0.35,
+            "confidence_min_samples": 12,
+            "agent_kwargs": alpha_direct_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="none", context_mode="pressure_unfinished_context"),
+        },
+        "reduced6_cbo_alpha_direct_prev_unfinished_context": {
+            "label": "Reduced6 CBO Alpha-Direct Prev-Unfinished Context Risk0",
+            "norm_mode": "fixed",
+            "control_mode": "alpha_direct",
+            "alpha_direct_control_variant": "risk_fixed_5d",
+            "alpha_direct_fixed_risk_scale": 0.0,
+            "scheduler_tradeoff_mode": "alpha_direct",
+            "deploy_policy": "greedy",
+            "method_family": "cbo_alpha_direct_prev_unfinished_context_risk0",
+            "context_mode": "pressure_prev_unfinished_context",
+            "history_mode": "recent_confidence",
+            "recent_window": 80,
+            "confidence_min": 0.35,
+            "confidence_min_samples": 12,
+            "agent_kwargs": alpha_direct_risk_fixed_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="none", context_mode="pressure_prev_unfinished_context", fixed_risk_scale=0.0),
+        },
         "reduced6_cbo_lite_full_taskmix": cbo_lite_group("Full+TaskMix Context", "full_taskmix"),
         "reduced6_cbo_lite_full_taskmix_counts": cbo_lite_group("Full+TaskMix+Counts Context", "full_taskmix_counts"),
         "reduced6_cbo_greedy_legacy": {
@@ -439,7 +484,7 @@ def map_group_theta_to_full(theta, group_cfg):
     if group_cfg.get("control_mode") == "reduced4":
         return reduced4_to_full_theta(theta)
     if group_cfg.get("control_mode") == "alpha_direct":
-        return alpha_direct_to_full_theta(theta)
+        return alpha_direct_to_full_theta(theta, group_cfg=group_cfg)
     if group_cfg.get("control_mode") == "reduced6":
         return reduced6_to_full_theta(theta)
     return list(theta)
@@ -572,6 +617,10 @@ ALPHA_DIRECT_FEATURE_NAMES = [
     "Alpha_RT", "Alpha_Batch", "Alpha_AI",
     "W_Queue", "W_Risk_Scale", "Cloud_Gate"
 ]
+ALPHA_DIRECT_RISK_FIXED_FEATURE_NAMES = [
+    "Alpha_RT", "Alpha_Batch", "Alpha_AI",
+    "W_Queue", "Cloud_Gate"
+]
 
 
 def _coerce_bounds_pair(value, fallback):
@@ -616,6 +665,18 @@ def get_alpha_direct_control_bounds():
     ]
 
 
+def get_alpha_direct_risk_fixed_control_bounds():
+    rt_lo, rt_hi = get_alpha_direct_task_bounds("RT")
+    batch_lo, batch_hi = get_alpha_direct_task_bounds("Batch")
+    ai_lo, ai_hi = get_alpha_direct_task_bounds("AI")
+    return [
+        [rt_lo, batch_lo, ai_lo,
+         float(CFG.CONTROL_QUEUE_BOUNDS[0]), float(REDUCED6_CLOUD_GATE_BOUNDS[0])],
+        [rt_hi, batch_hi, ai_hi,
+         float(CFG.CONTROL_QUEUE_BOUNDS[1]), float(REDUCED6_CLOUD_GATE_BOUNDS[1])],
+    ]
+
+
 def clip_alpha_direct_control_vector(theta6):
     base = [0.85, 0.85, 0.85, 1.0, 1.0, 0.30]
     t = list(theta6)
@@ -634,12 +695,44 @@ def clip_alpha_direct_control_vector(theta6):
     ]
 
 
+def clip_alpha_direct_risk_fixed_control_vector(theta5):
+    base = [0.85, 0.85, 0.85, 1.0, 0.30]
+    t = list(theta5)
+    if len(t) < 5:
+        t = t + base[len(t):]
+    rt_lo, rt_hi = get_alpha_direct_task_bounds("RT")
+    batch_lo, batch_hi = get_alpha_direct_task_bounds("Batch")
+    ai_lo, ai_hi = get_alpha_direct_task_bounds("AI")
+    return [
+        float(np.clip(float(t[0]), rt_lo, rt_hi)),
+        float(np.clip(float(t[1]), batch_lo, batch_hi)),
+        float(np.clip(float(t[2]), ai_lo, ai_hi)),
+        float(np.clip(float(t[3]), *CFG.CONTROL_QUEUE_BOUNDS)),
+        float(np.clip(float(t[4]), float(REDUCED6_CLOUD_GATE_BOUNDS[0]), float(REDUCED6_CLOUD_GATE_BOUNDS[1]))),
+    ]
+
+
+def expand_alpha_direct_control_vector(theta, group_cfg=None):
+    """Return scheduler-facing 6D alpha-direct controls."""
+    fixed_risk = None
+    if isinstance(group_cfg, dict):
+        fixed_risk = group_cfg.get("alpha_direct_fixed_risk_scale", None)
+    t = list(theta)
+    if fixed_risk is not None and len(t) == 5:
+        alpha_rt, alpha_batch, alpha_ai, queue_w, cloud_gate = clip_alpha_direct_risk_fixed_control_vector(t)
+        return [
+            float(alpha_rt), float(alpha_batch), float(alpha_ai),
+            float(queue_w), float(fixed_risk), float(cloud_gate),
+        ]
+    return clip_alpha_direct_control_vector(t)
+
+
 ALPHA_DIRECT_BOUNDS = get_alpha_direct_control_bounds()
 
 
-def alpha_direct_to_full_theta(theta6):
+def alpha_direct_to_full_theta(theta6, group_cfg=None):
     """Map alpha-direct controls into the full scheduler theta."""
-    alpha_rt, alpha_batch, alpha_ai, queue_w, risk_scale, cloud_gate = clip_alpha_direct_control_vector(theta6)
+    alpha_rt, alpha_batch, alpha_ai, queue_w, risk_scale, cloud_gate = expand_alpha_direct_control_vector(theta6, group_cfg=group_cfg)
     full = default_control_vector(fill=1.5)
     names = list(CFG.FEATURE_NAMES)
 
@@ -689,6 +782,22 @@ def alpha_direct_agent_kwargs(use_context=False, use_trust_region=False, anchor_
     }
 
 
+def alpha_direct_risk_fixed_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="none", context_mode=None, fixed_risk_scale=0.0):
+    context_dim = len(lite_context_feature_names(context_mode)) if context_mode else (len(CFG.CONTEXT_FEATURE_NAMES) if use_context else 0)
+    context_bounds = lite_context_bounds(context_mode) if context_mode else (CFG.CONTEXT_BOUNDS if use_context else None)
+    return {
+        "dim": len(ALPHA_DIRECT_RISK_FIXED_FEATURE_NAMES),
+        "bounds": get_alpha_direct_risk_fixed_control_bounds(),
+        "feature_names": list(ALPHA_DIRECT_RISK_FIXED_FEATURE_NAMES),
+        "use_context": bool(use_context),
+        "use_state_partition": bool(use_context and not context_mode),
+        "use_trust_region": bool(use_trust_region),
+        "context_dim": context_dim,
+        "context_bounds": context_bounds,
+        "anchor_points": [],
+    }
+
+
 def _control_feature_names_for_vector(vec):
     try:
         n = len(vec)
@@ -721,6 +830,10 @@ def run_scenario_group(seed, group_key, group_cfg):
     method_scheduler_tradeoff_mode = group_cfg.get("scheduler_tradeoff_mode")
     if method_scheduler_tradeoff_mode:
         CFG.SCHEDULER_TRADEOFF_MODE = str(method_scheduler_tradeoff_mode)
+    old_use_score_risk = bool(getattr(CFG, "USE_SCORE_RISK", True))
+    method_use_score_risk = group_cfg.get("scheduler_use_score_risk", None)
+    if method_use_score_risk is not None:
+        CFG.USE_SCORE_RISK = bool(method_use_score_risk)
     is_reduced = group_cfg.get("control_mode") in {"reduced4", "reduced6", "alpha_direct"}
     fac.disable_internal_agent_tell = bool(is_reduced and fac.agent is not None)
 
@@ -758,6 +871,8 @@ def run_scenario_group(seed, group_key, group_cfg):
     fac.perf_log["cohort_feedback_debug_rows"] = list(getattr(fac, "cohort_feedback_rows", []))
     if method_scheduler_tradeoff_mode:
         CFG.SCHEDULER_TRADEOFF_MODE = old_scheduler_tradeoff_mode
+    if method_use_score_risk is not None:
+        CFG.USE_SCORE_RISK = old_use_score_risk
     return fac.perf_log
 
 def best_so_far(seq):
@@ -1125,13 +1240,16 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "cbo_backlog_growth_penalty_weight": float(getattr(CFG, "CBO_BACKLOG_GROWTH_PENALTY_WEIGHT", 2.0)),
             "cbo_class_imbalance_weight": float(getattr(CFG, "CBO_CLASS_IMBALANCE_WEIGHT", 0.0)),
             "scheduler_tradeoff_mode": str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy")),
+            "scheduler_use_score_risk": bool(getattr(CFG, "USE_SCORE_RISK", True)),
             "scheduler_tradeoff_alpha": float(getattr(CFG, "SCHEDULER_TRADEOFF_ALPHA", 0.85)),
             "scheduler_alpha_min": float(getattr(CFG, "SCHEDULER_ALPHA_MIN", 0.60)),
             "scheduler_alpha_max": float(getattr(CFG, "SCHEDULER_ALPHA_MAX", 0.97)),
+            "scheduler_le_scale": float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)),
             "alpha_direct_bounds": getattr(CFG, "ALPHA_DIRECT_BOUNDS", None),
             "alpha_direct_rt_bounds": getattr(CFG, "ALPHA_DIRECT_RT_BOUNDS", None),
             "alpha_direct_batch_bounds": getattr(CFG, "ALPHA_DIRECT_BATCH_BOUNDS", None),
             "alpha_direct_ai_bounds": getattr(CFG, "ALPHA_DIRECT_AI_BOUNDS", None),
+            "alpha_direct_fixed_theta": getattr(CFG, "ALPHA_DIRECT_FIXED_THETA", None),
             "alpha_direct_effective_bounds": get_alpha_direct_control_bounds(),
             "scheduler_service_latency_weight": float(getattr(CFG, "SCHEDULER_SERVICE_LATENCY_WEIGHT", 1.0)),
             "scheduler_service_risk_weight": float(getattr(CFG, "SCHEDULER_SERVICE_RISK_WEIGHT", 1.0)),
@@ -1141,6 +1259,7 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "scheduler_norm_clip_max": float(getattr(CFG, "SCHEDULER_NORM_CLIP_MAX", 3.0)),
             "scheduler_norm_eps": float(getattr(CFG, "SCHEDULER_NORM_EPS", 1e-6)),
             "scheduler_norm_ema_alpha": float(getattr(CFG, "SCHEDULER_NORM_EMA_ALPHA", 0.995)),
+            "use_boltzmann_random": bool(getattr(CFG, "USE_BOLTZMANN_RANDOM", True)),
             "deploy_policy_arg": _deploy_policy_arg(),
             "effective_deploy_policy": os.environ.get("SAFEBO_POLICY", None),
             "safe_bo_policy": os.environ.get("SAFEBO_POLICY", None),
@@ -1206,6 +1325,13 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "cbo_radius_surprise_boost_threshold": float(getattr(CFG, "CBO_RADIUS_SURPRISE_BOOST_THRESHOLD", 2.0)),
             "cbo_radius_beta_boost": float(getattr(CFG, "CBO_RADIUS_BETA_BOOST", 1.5)),
             "cbo_radius_beta_cap": float(getattr(CFG, "CBO_RADIUS_BETA_CAP", 3.0)),
+            "cbo_good_region_guard": str(getattr(CFG, "CBO_GOOD_REGION_GUARD", "off")),
+            "cbo_good_region_window": int(getattr(CFG, "CBO_GOOD_REGION_WINDOW", 50)),
+            "cbo_good_region_worse_pct": float(getattr(CFG, "CBO_GOOD_REGION_WORSE_PCT", 0.03)),
+            "cbo_good_region_distance_threshold": float(getattr(CFG, "CBO_GOOD_REGION_DISTANCE_THRESHOLD", 0.35)),
+            "cbo_good_region_tr_radius_threshold": float(getattr(CFG, "CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15)),
+            "cbo_good_region_beta_threshold": float(getattr(CFG, "CBO_GOOD_REGION_BETA_THRESHOLD", 0.5)),
+            "cbo_good_region_guard_mode": str(getattr(CFG, "CBO_GOOD_REGION_GUARD_MODE", "conservative")),
             "cbo_service_guard_mode": str(getattr(CFG, "CBO_SERVICE_GUARD_MODE", "off")),
             "cbo_service_guard_delay_pct": float(getattr(CFG, "CBO_SERVICE_GUARD_DELAY_PCT", 0.03)),
             "cbo_service_guard_backlog_pct": float(getattr(CFG, "CBO_SERVICE_GUARD_BACKLOG_PCT", 0.03)),
@@ -1220,6 +1346,8 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "cbo_selection_cooldown": int(getattr(CFG, "CBO_SELECTION_COOLDOWN", 5)),
             "cbo_condition_anchor_switch": str(getattr(CFG, "CBO_CONDITION_ANCHOR_SWITCH", "context_best")),
             "lite_context_feature_names": list(LITE_CONTEXT_FEATURE_NAMES),
+            "pressure_unfinished_context_names": list(globals().get("PRESSURE_UNFINISHED_CONTEXT_NAMES", [])),
+            "pressure_prev_unfinished_context_names": list(globals().get("PRESSURE_PREV_UNFINISHED_CONTEXT_NAMES", [])),
             "lite_context_mode_specs": {k: {"label": v.get("label"), "feature_names": [LITE_CONTEXT_FEATURE_NAMES[i] for i in v.get("indices", [])]} for k, v in LITE_CONTEXT_MODE_SPECS.items()},
             "notes": "v3 adds recent/confidence BO and CBO-lite. BO remains cold-start; low-confidence window feedback can be filtered for GP training.",
         }
@@ -1252,6 +1380,7 @@ def run_scenario_method_experiments(repeat_runs=1, selected_keys=None, output_di
     groups = apply_deploy_policy_override(groups)
     groups = apply_history_policy_override(groups)
     groups = apply_cbo_stability_policy_override(groups)
+    groups = apply_alpha_direct_fixed_theta_override(groups)
     _write_refactor_config_snapshot(SCENARIO_SAVE_DIR, selected_keys=selected_keys, groups=groups)
     group_logs = {k: {"label": v["label"], "logs": []} for k, v in groups.items()}
     # v6.2 runtime logging: saved incrementally after each method finishes.
@@ -1468,6 +1597,7 @@ def run_ratio_grid_experiments(repeat_runs=1, step=10, min_ratio=10, output_root
                 "bo_interval": float(CFG.BO_INTERVAL),
                 "repeat_runs": int(max(1, repeat_runs)),
                 "selected_keys": selected_keys,
+                "scheduler_le_scale": float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)),
                 "use_task_type_adaptation": bool(getattr(CFG, "USE_TASK_TYPE_ADAPTATION", False)),
                 "normalization": "支持 fixed 和 rolling 两种归一化；默认四线为 fixednorm基线/BO + rollingnorm基线/BO",
             }
@@ -1718,6 +1848,7 @@ def run_pressure_scan_experiments(repeat_runs=1, lambda_values=None, output_root
                     "bo_interval": float(CFG.BO_INTERVAL),
                     "repeat_runs": int(max(1, repeat_runs)),
                     "selected_keys": selected_keys,
+                    "scheduler_le_scale": float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)),
                     "cloud_delay_mult": float(getattr(CFG, "CLOUD_DELAY_MULT", 1.0)),
                     "cloud_energy_mult": float(getattr(CFG, "CLOUD_ENERGY_MULT", 1.0)),
                     "cloud_speed_mult": float(getattr(CFG, "CLOUD_SPEED_MULT", 1.0)),
