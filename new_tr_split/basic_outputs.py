@@ -217,6 +217,7 @@ def aggregate_logs(logs):
             "state_beta_boost_reason", "service_guard_mode", "service_guard_reason",
             "macro_context_key", "energy_metric_source", "cbo_reference_mode", "cbo_reference_status", "cbo_objective_mode", "bo_training_cost_source",
             "scheduler_tradeoff_mode", "scheduler_score_norm_mode",
+            "cbo_history_denoise_mode", "cbo_history_denoise_stat", "cbo_history_denoise_apply_to", "cbo_history_outlier_scale", "cbo_history_outlier_pressure_fields_available",
             "context_mode", "context_status",
             "control_vector_meaning", "alpha_direct_feature_names", "theta_full_feature_names", "context_feature_names",
         }:

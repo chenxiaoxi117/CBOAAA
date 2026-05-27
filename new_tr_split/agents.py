@@ -553,12 +553,18 @@ class FederatedBOAgent:
         if len(x) < 2:
             return None
         try:
-            y_mean = y.mean(dim=0)
-            y_std = y.std(dim=0, unbiased=False)
+            prepare_fn = globals().get("prepare_gp_training_data")
+            x_fit, y_fit, records_fit = x, y, records
+            if callable(prepare_fn):
+                x_fit, y_fit, records_fit, _denoise_stats = prepare_fn(self, x, y, records)
+            if len(x_fit) < 2:
+                return None
+            y_mean = y_fit.mean(dim=0)
+            y_std = y_fit.std(dim=0, unbiased=False)
             y_std = torch.where(y_std == 0, torch.tensor(1.0, dtype=y_std.dtype), y_std)
-            y_std_vals = (y - y_mean) / y_std
+            y_std_vals = (y_fit - y_mean) / y_std
             bounds_full = self._combined_bounds()
-            x_norm = torch.clamp(normalize(x, bounds_full), 0.0, 1.0)
+            x_norm = torch.clamp(normalize(x_fit, bounds_full), 0.0, 1.0)
             gp = SingleTaskGP(x_norm, y_std_vals)
             mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
             with warnings.catch_warnings():
@@ -570,7 +576,10 @@ class FederatedBOAgent:
                 "y_mean": y_mean.detach(),
                 "y_std": y_std.detach(),
                 "bounds": bounds_full.clone(),
-                "records": records,
+                "records": records_fit,
+                "raw_y": y.detach().clone(),
+                "used_y": y_fit.detach().clone(),
+                "denoise_stats": dict(getattr(self, "cbo_last_history_denoise_stats", {}) or {}),
             }
         except Exception as e:
             print(f"fit_local_gp failed: {e}")
@@ -784,7 +793,7 @@ class FederatedBOAgent:
             return self._ask_contextual(state=state, context=context)
         self.step_count += 1
         raw_candidates = []
-        train_x, train_y, _ = self._training_data(state=state)
+        train_x, train_y, train_records = self._training_data(state=state)
         step_acq_data = {"step": self.step_count, "candidates": [], "acq_values": [], "best_selected": None, "model_state_dict": None}
         low = self.bounds[0].tolist()
         high = self.bounds[1].tolist()
@@ -809,8 +818,14 @@ class FederatedBOAgent:
             try:
                 with torch.random.fork_rng():
                     torch.manual_seed(self._next_torch_seed())
-                    train_y_std = standardize(train_y)
-                    train_x_norm = torch.clamp(normalize(train_x, self.bounds), 0.0, 1.0)
+                    prepare_fn = globals().get("prepare_gp_training_data")
+                    train_x_fit, train_y_fit, train_records_fit = train_x, train_y, train_records
+                    if callable(prepare_fn):
+                        train_x_fit, train_y_fit, train_records_fit, _denoise_stats = prepare_fn(self, train_x, train_y, train_records)
+                    if len(train_x_fit) < 2:
+                        raise RuntimeError("insufficient training rows after history denoise/filter")
+                    train_y_std = standardize(train_y_fit)
+                    train_x_norm = torch.clamp(normalize(train_x_fit, self.bounds), 0.0, 1.0)
                     gp = SingleTaskGP(train_x_norm, train_y_std)
                     mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
                     with warnings.catch_warnings():

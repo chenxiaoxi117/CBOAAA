@@ -38,6 +38,16 @@ if __name__ == "__main__":
         except ValueError:
             parser.error(f"{option_name} must contain numeric values")
 
+    def _parse_bool_arg(value):
+        if isinstance(value, bool):
+            return value
+        val = str(value).strip().lower()
+        if val in {"1", "true", "yes", "y", "on"}:
+            return True
+        if val in {"0", "false", "no", "n", "off"}:
+            return False
+        raise argparse.ArgumentTypeError("expected one of true/false, yes/no, on/off, 1/0")
+
     parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "offline_noise"], default="all")
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--local-delta", type=float, default=0.08)
@@ -167,6 +177,33 @@ if __name__ == "__main__":
     parser.add_argument("--cbo-good-region-tr-radius-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_TR_RADIUS_THRESHOLD", 0.15), help="TR radius threshold that triggers good-region fallback")
     parser.add_argument("--cbo-good-region-beta-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_BETA_THRESHOLD", 0.5), help="Acquisition beta threshold that triggers good-region fallback")
     parser.add_argument("--cbo-good-region-guard-mode", choices=["conservative", "distance_only", "performance_only"], default=getattr(CFG, "DEFAULT_CBO_GOOD_REGION_GUARD_MODE", "conservative"), help="Condition set used by the good-region deployment guard")
+    parser.add_argument("--cbo-warm-start-history", type=str, default=getattr(CFG, "DEFAULT_CBO_WARM_START_HISTORY", ""), help="CSV file or directory containing bo_warm_history.csv rows to seed target CBO history")
+    parser.add_argument("--cbo-warm-start-mode", choices=["none", "all", "similar_topk"], default=getattr(CFG, "DEFAULT_CBO_WARM_START_MODE", "none"), help="Warm-start target CBO from exported BO history; default none")
+    parser.add_argument("--cbo-warm-start-topk", type=int, default=getattr(CFG, "DEFAULT_CBO_WARM_START_TOPK", 100), help="similar_topk rows kept by target initial-context distance")
+    parser.add_argument("--cbo-warm-start-max-rows", type=int, default=getattr(CFG, "DEFAULT_CBO_WARM_START_MAX_ROWS", 300), help="Maximum compatible warm-start rows injected into a target CBO agent")
+    parser.add_argument("--cbo-warm-start-label", type=str, default=getattr(CFG, "DEFAULT_CBO_WARM_START_LABEL", ""), help="Label written into source_scene_label when exporting bo_warm_history.csv")
+    parser.add_argument("--cbo-history-denoise-mode", choices=["off", "local_median", "local_outlier_filter", "strict_local_outlier_filter"], default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_MODE", "off"), help="Denoise BO training targets before GP fit; default off preserves legacy behavior")
+    parser.add_argument("--cbo-history-denoise-k", type=int, default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_K", 7), help="Max nearest neighbors used for history denoising")
+    parser.add_argument("--cbo-history-denoise-radius", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_RADIUS", 0.12), help="Combined normalized theta/context radius for history denoising")
+    parser.add_argument("--cbo-history-denoise-min-neighbors", type=int, default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_MIN_NEIGHBORS", 3), help="Minimum neighbors required before smoothing a training target")
+    parser.add_argument("--cbo-history-denoise-context-weight", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_CONTEXT_WEIGHT", 1.0), help="Context distance weight for history denoising")
+    parser.add_argument("--cbo-history-denoise-theta-weight", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_THETA_WEIGHT", 1.0), help="Theta distance weight for history denoising")
+    parser.add_argument("--cbo-history-denoise-stat", choices=["median", "trimmed_mean"], default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_STAT", "median"), help="Robust statistic used for denoised training targets")
+    parser.add_argument("--cbo-history-denoise-trim-pct", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_TRIM_PCT", 0.1), help="Two-sided trim fraction for trimmed_mean denoising")
+    parser.add_argument("--cbo-history-denoise-apply-to", choices=["local", "warm", "all"], default=getattr(CFG, "DEFAULT_CBO_HISTORY_DENOISE_APPLY_TO", "all"), help="Which selected training rows are eligible for denoising")
+    parser.add_argument("--cbo-history-outlier-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_THRESHOLD", 3.0), help="Robust local z threshold for local_outlier_filter")
+    parser.add_argument("--cbo-history-outlier-abs-threshold", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_ABS_THRESHOLD", 500.0), help="Absolute residual threshold for local_outlier_filter")
+    parser.add_argument("--cbo-history-outlier-max-filter-ratio", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_MAX_FILTER_RATIO", 0.2), help="Maximum fraction of training rows filtered by local_outlier_filter")
+    parser.add_argument("--cbo-history-outlier-scale", choices=["mad", "iqr", "std"], default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_SCALE", "mad"), help="Robust scale used by local_outlier_filter")
+    parser.add_argument("--cbo-history-outlier-theta-radius", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_THETA_RADIUS", 0.12), help="Strict outlier filter normalized theta radius")
+    parser.add_argument("--cbo-history-outlier-context-radius", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_CONTEXT_RADIUS", 0.50), help="Strict outlier filter normalized context radius")
+    parser.add_argument("--cbo-history-outlier-min-peers", type=int, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_MIN_PEERS", 3), help="Strict outlier filter minimum leave-one-out peers")
+    parser.add_argument("--cbo-history-outlier-use-leave-one-out", type=_parse_bool_arg, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_USE_LEAVE_ONE_OUT", True), help="Whether strict outlier peers exclude the row itself")
+    parser.add_argument("--cbo-history-outlier-export-filtered", type=_parse_bool_arg, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_EXPORT_FILTERED", True), help="Export strict outlier filtered record details to CSV")
+    parser.add_argument("--cbo-history-outlier-protect-pressure", action="store_true", default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_PROTECT_PRESSURE", False), help="Protect high-pressure strict outlier candidates from filtering")
+    parser.add_argument("--cbo-history-outlier-pressure-quantile", type=float, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_PRESSURE_QUANTILE", 0.75), help="Quantile threshold for pressure protection")
+    parser.add_argument("--cbo-history-outlier-protect-high-cost-only", type=_parse_bool_arg, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_PROTECT_HIGH_COST_ONLY", True), help="Only protect candidates that are higher-cost than local peers")
+    parser.add_argument("--cbo-history-outlier-pressure-fields", type=str, default=getattr(CFG, "DEFAULT_CBO_HISTORY_OUTLIER_PRESSURE_FIELDS", "Avg_Delay,Backlog,unfinished_end,Violation"), help="Comma-separated pressure fields used by strict outlier protection")
     parser.add_argument("--cbo-service-guard-mode", choices=["off", "soft"], default=getattr(CFG, "DEFAULT_CBO_SERVICE_GUARD_MODE", "off"), help="Optional service-aware exploration score guard")
     parser.add_argument("--cbo-service-guard-delay-pct", type=float, default=getattr(CFG, "DEFAULT_CBO_SERVICE_GUARD_DELAY_PCT", 0.03), help="Delay degradation threshold for service guard")
     parser.add_argument("--cbo-service-guard-backlog-pct", type=float, default=getattr(CFG, "DEFAULT_CBO_SERVICE_GUARD_BACKLOG_PCT", 0.03), help="Backlog degradation threshold for service guard")
@@ -201,6 +238,7 @@ if __name__ == "__main__":
         CFG.USE_FIXED_RNG = True
     if args.fixed_seed is not None:
         CFG.FIXED_RNG_SEED = args.fixed_seed
+        CFG.BASE_SEED = args.fixed_seed
     if args.no_boltzmann_random:
         CFG.USE_BOLTZMANN_RANDOM = False
     if args.rt_deadline_factor is not None:
@@ -346,6 +384,33 @@ if __name__ == "__main__":
     CFG.CBO_GOOD_REGION_TR_RADIUS_THRESHOLD = float(args.cbo_good_region_tr_radius_threshold)
     CFG.CBO_GOOD_REGION_BETA_THRESHOLD = float(args.cbo_good_region_beta_threshold)
     CFG.CBO_GOOD_REGION_GUARD_MODE = str(args.cbo_good_region_guard_mode)
+    CFG.CBO_WARM_START_HISTORY = str(args.cbo_warm_start_history or "")
+    CFG.CBO_WARM_START_MODE = str(args.cbo_warm_start_mode)
+    CFG.CBO_WARM_START_TOPK = int(args.cbo_warm_start_topk)
+    CFG.CBO_WARM_START_MAX_ROWS = int(args.cbo_warm_start_max_rows)
+    CFG.CBO_WARM_START_LABEL = str(args.cbo_warm_start_label or "")
+    CFG.CBO_HISTORY_DENOISE_MODE = str(args.cbo_history_denoise_mode)
+    CFG.CBO_HISTORY_DENOISE_K = int(args.cbo_history_denoise_k)
+    CFG.CBO_HISTORY_DENOISE_RADIUS = float(args.cbo_history_denoise_radius)
+    CFG.CBO_HISTORY_DENOISE_MIN_NEIGHBORS = int(args.cbo_history_denoise_min_neighbors)
+    CFG.CBO_HISTORY_DENOISE_CONTEXT_WEIGHT = float(args.cbo_history_denoise_context_weight)
+    CFG.CBO_HISTORY_DENOISE_THETA_WEIGHT = float(args.cbo_history_denoise_theta_weight)
+    CFG.CBO_HISTORY_DENOISE_STAT = str(args.cbo_history_denoise_stat)
+    CFG.CBO_HISTORY_DENOISE_TRIM_PCT = float(args.cbo_history_denoise_trim_pct)
+    CFG.CBO_HISTORY_DENOISE_APPLY_TO = str(args.cbo_history_denoise_apply_to)
+    CFG.CBO_HISTORY_OUTLIER_THRESHOLD = float(args.cbo_history_outlier_threshold)
+    CFG.CBO_HISTORY_OUTLIER_ABS_THRESHOLD = float(args.cbo_history_outlier_abs_threshold)
+    CFG.CBO_HISTORY_OUTLIER_MAX_FILTER_RATIO = float(args.cbo_history_outlier_max_filter_ratio)
+    CFG.CBO_HISTORY_OUTLIER_SCALE = str(args.cbo_history_outlier_scale)
+    CFG.CBO_HISTORY_OUTLIER_THETA_RADIUS = float(args.cbo_history_outlier_theta_radius)
+    CFG.CBO_HISTORY_OUTLIER_CONTEXT_RADIUS = float(args.cbo_history_outlier_context_radius)
+    CFG.CBO_HISTORY_OUTLIER_MIN_PEERS = int(args.cbo_history_outlier_min_peers)
+    CFG.CBO_HISTORY_OUTLIER_USE_LEAVE_ONE_OUT = bool(args.cbo_history_outlier_use_leave_one_out)
+    CFG.CBO_HISTORY_OUTLIER_EXPORT_FILTERED = bool(args.cbo_history_outlier_export_filtered)
+    CFG.CBO_HISTORY_OUTLIER_PROTECT_PRESSURE = bool(args.cbo_history_outlier_protect_pressure)
+    CFG.CBO_HISTORY_OUTLIER_PRESSURE_QUANTILE = float(args.cbo_history_outlier_pressure_quantile)
+    CFG.CBO_HISTORY_OUTLIER_PROTECT_HIGH_COST_ONLY = bool(args.cbo_history_outlier_protect_high_cost_only)
+    CFG.CBO_HISTORY_OUTLIER_PRESSURE_FIELDS = str(args.cbo_history_outlier_pressure_fields)
     CFG.CBO_SERVICE_GUARD_MODE = str(args.cbo_service_guard_mode)
     CFG.CBO_SERVICE_GUARD_DELAY_PCT = float(args.cbo_service_guard_delay_pct)
     CFG.CBO_SERVICE_GUARD_BACKLOG_PCT = float(args.cbo_service_guard_backlog_pct)

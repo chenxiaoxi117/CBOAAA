@@ -1089,6 +1089,20 @@ def save_scenario_experiment_csvs(group_logs):
     for group_key, info in group_logs.items():
         mean_log = aggregate_logs(info["logs"])
         round_df = group_log_to_dataframe(mean_log, group_key, info["label"])
+        if len(info.get("logs", [])) == 1 and not round_df.empty:
+            raw_log = info["logs"][0]
+            warm_meta_cols = [
+                "cbo_warm_start_enabled", "cbo_warm_start_mode", "cbo_warm_start_loaded_rows",
+                "cbo_warm_start_used_rows", "selected_warm_rows_count", "selected_local_rows_count",
+                "cbo_warm_start_history_path",
+            ]
+            for col in warm_meta_cols:
+                vals = list(raw_log.get(col, [])) if isinstance(raw_log, dict) else []
+                if vals:
+                    fill = vals[-1]
+                    while len(vals) < len(round_df):
+                        vals.append(fill)
+                    round_df[col] = vals[:len(round_df)]
         round_df.to_csv(os.path.join(SCENARIO_SAVE_DIR, f"{group_key}_round_summary_轮次汇总.csv"), index=False)
 
         context_source_log = info["logs"][0] if len(info.get("logs", [])) == 1 else mean_log
@@ -1467,6 +1481,12 @@ def run_scenario_method_experiments(repeat_runs=1, selected_keys=None, output_di
     plot_group_alloc_heatmaps(group_logs, save_dir=SCENARIO_SAVE_DIR, prefix="scenario")
     plot_group_task_delay_bars(group_logs, save_dir=SCENARIO_SAVE_DIR, prefix="scenario")
     save_extra_diagnostics(group_logs)
+    export_warm_fn = globals().get("export_bo_warm_history_csv")
+    if callable(export_warm_fn):
+        try:
+            export_warm_fn(group_logs, output_dir=SCENARIO_SAVE_DIR, selected_keys=selected_keys, groups=groups)
+        except Exception as e:
+            print(f"[WARN] failed to export bo_warm_history.csv: {e}", flush=True)
     if output_dir is not None:
         SCENARIO_SAVE_DIR = old_save_dir
     return group_logs

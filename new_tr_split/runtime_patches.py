@@ -1199,10 +1199,12 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
     if agent is not None:
         debug = dict(getattr(agent, "last_debug_info", {}) or {})
         debug.update(dict(getattr(agent, "last_history_debug", {}) or {}))
+        debug.update(dict(getattr(agent, "cbo_last_history_denoise_stats", {}) or {}))
         for k in [
             "history_select_mode", "effective_history_mode", "effective_recent_window",
             "selected_recent_count", "selected_macro_count", "selected_context_count", "selected_elite_count",
-            "selected_diverse_count", "selected_total_count", "context_similarity_max",
+            "selected_diverse_count", "selected_total_count", "selected_warm_rows_count",
+            "selected_local_rows_count", "cbo_warm_start_used_rows", "context_similarity_max",
             "context_similarity_mean", "elite_best_robust_score", "elite_best_eval_count",
             "elite_best_mean_cost", "elite_best_std_cost", "cbo_tr_mode", "cbo_tr_anchor_mode",
             "cbo_tr_radius", "cbo_tr_anchor_theta", "cbo_tr_candidate_count",
@@ -1239,9 +1241,37 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "predicted_cost", "actual_cost", "prediction_error", "surprise", "cost_gap_pct",
             "residual_trigger", "condition_trigger", "radius_min_stuck_count",
             "force_explore_countdown", "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
+            "cbo_history_denoise_mode", "cbo_history_denoise_k", "cbo_history_denoise_radius",
+            "cbo_history_denoise_min_neighbors", "cbo_history_denoise_context_weight",
+            "cbo_history_denoise_theta_weight", "cbo_history_denoise_stat",
+            "cbo_history_denoise_apply_to", "cbo_history_denoise_raw_rows",
+            "cbo_history_denoise_smoothed_rows", "cbo_history_denoise_unsmoothed_rows",
+            "cbo_history_denoise_smoothed_ratio", "cbo_history_denoise_neighbor_count_mean",
+            "cbo_history_denoise_neighbor_count_max", "cbo_history_denoise_abs_delta_mean",
+            "cbo_history_denoise_abs_delta_max", "cbo_history_denoise_y_raw_mean",
+            "cbo_history_denoise_y_used_mean",
+            "cbo_history_outlier_filter_enabled", "cbo_history_outlier_strict_enabled",
+            "cbo_history_outlier_raw_rows",
+            "cbo_history_outlier_filtered_rows", "cbo_history_outlier_used_rows",
+            "cbo_history_outlier_filter_ratio", "cbo_history_outlier_neighbor_count_mean",
+            "cbo_history_outlier_neighbor_count_max", "cbo_history_outlier_theta_radius",
+            "cbo_history_outlier_context_radius", "cbo_history_outlier_min_peers",
+            "cbo_history_outlier_peer_count_mean", "cbo_history_outlier_peer_count_max",
+            "cbo_history_outlier_protect_pressure", "cbo_history_outlier_pressure_quantile",
+            "cbo_history_outlier_pressure_fields_available", "cbo_history_outlier_candidate_rows",
+            "cbo_history_outlier_protected_rows", "cbo_history_outlier_filtered_rows_before_protection",
+            "cbo_history_outlier_filtered_rows_after_protection", "cbo_history_outlier_protected_ratio",
+            "cbo_history_outlier_pressure_delay_threshold", "cbo_history_outlier_pressure_backlog_threshold",
+            "cbo_history_outlier_pressure_unfinished_threshold", "cbo_history_outlier_pressure_violation_threshold",
+            "cbo_history_outlier_residual_mean",
+            "cbo_history_outlier_residual_max", "cbo_history_outlier_threshold",
+            "cbo_history_outlier_abs_threshold", "cbo_history_outlier_max_filter_ratio",
+            "cbo_history_outlier_scale",
         ]:
             if k in debug:
                 info[k] = debug.get(k)
+        for k, v in _cbo_history_denoise_default_stats(agent, raw_rows=0).items():
+            info.setdefault(k, v)
         info.setdefault("history_select_mode", getattr(agent, "cbo_history_select_mode", _cfg_cbo_history_select_mode("recent")))
         info.setdefault("effective_history_mode", getattr(agent, "history_mode", _cfg_history_mode("all")))
         info.setdefault("effective_recent_window", getattr(agent, "recent_window", _cfg_recent_window()))
@@ -1934,6 +1964,648 @@ def _cfg_cbo_str(name, default):
     return str(getattr(CFG, name, os.environ.get(name, default)) or default).strip().lower()
 
 
+def _cbo_history_denoise_cfg(agent=None):
+    get_attr = getattr
+    return {
+        "mode": str(get_attr(agent, "cbo_history_denoise_mode", get_attr(CFG, "CBO_HISTORY_DENOISE_MODE", "off")) or "off").strip().lower(),
+        "k": max(1, int(get_attr(agent, "cbo_history_denoise_k", get_attr(CFG, "CBO_HISTORY_DENOISE_K", 7)))),
+        "radius": max(0.0, float(get_attr(agent, "cbo_history_denoise_radius", get_attr(CFG, "CBO_HISTORY_DENOISE_RADIUS", 0.12)))),
+        "min_neighbors": max(1, int(get_attr(agent, "cbo_history_denoise_min_neighbors", get_attr(CFG, "CBO_HISTORY_DENOISE_MIN_NEIGHBORS", 3)))),
+        "context_weight": max(0.0, float(get_attr(agent, "cbo_history_denoise_context_weight", get_attr(CFG, "CBO_HISTORY_DENOISE_CONTEXT_WEIGHT", 1.0)))),
+        "theta_weight": max(0.0, float(get_attr(agent, "cbo_history_denoise_theta_weight", get_attr(CFG, "CBO_HISTORY_DENOISE_THETA_WEIGHT", 1.0)))),
+        "stat": str(get_attr(agent, "cbo_history_denoise_stat", get_attr(CFG, "CBO_HISTORY_DENOISE_STAT", "median")) or "median").strip().lower(),
+        "trim_pct": float(np.clip(float(get_attr(agent, "cbo_history_denoise_trim_pct", get_attr(CFG, "CBO_HISTORY_DENOISE_TRIM_PCT", 0.1))), 0.0, 0.49)),
+        "apply_to": str(get_attr(agent, "cbo_history_denoise_apply_to", get_attr(CFG, "CBO_HISTORY_DENOISE_APPLY_TO", "all")) or "all").strip().lower(),
+        "outlier_threshold": max(0.0, float(get_attr(agent, "cbo_history_outlier_threshold", get_attr(CFG, "CBO_HISTORY_OUTLIER_THRESHOLD", 3.0)))),
+        "outlier_abs_threshold": max(0.0, float(get_attr(agent, "cbo_history_outlier_abs_threshold", get_attr(CFG, "CBO_HISTORY_OUTLIER_ABS_THRESHOLD", 500.0)))),
+        "outlier_max_filter_ratio": float(np.clip(float(get_attr(agent, "cbo_history_outlier_max_filter_ratio", get_attr(CFG, "CBO_HISTORY_OUTLIER_MAX_FILTER_RATIO", 0.2))), 0.0, 1.0)),
+        "outlier_scale": str(get_attr(agent, "cbo_history_outlier_scale", get_attr(CFG, "CBO_HISTORY_OUTLIER_SCALE", "mad")) or "mad").strip().lower(),
+        "outlier_theta_radius": max(0.0, float(get_attr(agent, "cbo_history_outlier_theta_radius", get_attr(CFG, "CBO_HISTORY_OUTLIER_THETA_RADIUS", 0.12)))),
+        "outlier_context_radius": max(0.0, float(get_attr(agent, "cbo_history_outlier_context_radius", get_attr(CFG, "CBO_HISTORY_OUTLIER_CONTEXT_RADIUS", 0.50)))),
+        "outlier_min_peers": max(1, int(get_attr(agent, "cbo_history_outlier_min_peers", get_attr(CFG, "CBO_HISTORY_OUTLIER_MIN_PEERS", 3)))),
+        "outlier_use_leave_one_out": bool(get_attr(agent, "cbo_history_outlier_use_leave_one_out", get_attr(CFG, "CBO_HISTORY_OUTLIER_USE_LEAVE_ONE_OUT", True))),
+        "outlier_export_filtered": bool(get_attr(agent, "cbo_history_outlier_export_filtered", get_attr(CFG, "CBO_HISTORY_OUTLIER_EXPORT_FILTERED", True))),
+        "outlier_protect_pressure": bool(get_attr(agent, "cbo_history_outlier_protect_pressure", get_attr(CFG, "CBO_HISTORY_OUTLIER_PROTECT_PRESSURE", False))),
+        "outlier_pressure_quantile": float(np.clip(float(get_attr(agent, "cbo_history_outlier_pressure_quantile", get_attr(CFG, "CBO_HISTORY_OUTLIER_PRESSURE_QUANTILE", 0.75))), 0.0, 1.0)),
+        "outlier_protect_high_cost_only": bool(get_attr(agent, "cbo_history_outlier_protect_high_cost_only", get_attr(CFG, "CBO_HISTORY_OUTLIER_PROTECT_HIGH_COST_ONLY", True))),
+        "outlier_pressure_fields": str(get_attr(agent, "cbo_history_outlier_pressure_fields", get_attr(CFG, "CBO_HISTORY_OUTLIER_PRESSURE_FIELDS", "Avg_Delay,Backlog,unfinished_end,Violation")) or "").strip(),
+    }
+
+
+def _cbo_history_denoise_default_stats(agent=None, raw_rows=0, y_raw=None, y_used=None):
+    cfg = _cbo_history_denoise_cfg(agent)
+    raw_rows = int(raw_rows or 0)
+
+    def finite_mean(vals):
+        if vals is None:
+            return 0.0
+        arr = np.asarray(vals.detach().cpu().numpy() if hasattr(vals, "detach") else vals, dtype=float).reshape(-1)
+        arr = arr[np.isfinite(arr)]
+        return float(np.mean(arr)) if arr.size else 0.0
+
+    return {
+        "cbo_history_denoise_mode": cfg["mode"],
+        "cbo_history_denoise_k": int(cfg["k"]),
+        "cbo_history_denoise_radius": float(cfg["radius"]),
+        "cbo_history_denoise_min_neighbors": int(cfg["min_neighbors"]),
+        "cbo_history_denoise_context_weight": float(cfg["context_weight"]),
+        "cbo_history_denoise_theta_weight": float(cfg["theta_weight"]),
+        "cbo_history_denoise_stat": cfg["stat"],
+        "cbo_history_denoise_apply_to": cfg["apply_to"],
+        "cbo_history_denoise_raw_rows": raw_rows,
+        "cbo_history_denoise_smoothed_rows": 0,
+        "cbo_history_denoise_unsmoothed_rows": raw_rows,
+        "cbo_history_denoise_smoothed_ratio": 0.0,
+        "cbo_history_denoise_neighbor_count_mean": 0.0,
+        "cbo_history_denoise_neighbor_count_max": 0,
+        "cbo_history_denoise_abs_delta_mean": 0.0,
+        "cbo_history_denoise_abs_delta_max": 0.0,
+        "cbo_history_denoise_y_raw_mean": finite_mean(y_raw),
+        "cbo_history_denoise_y_used_mean": finite_mean(y_used if y_used is not None else y_raw),
+        "cbo_history_outlier_filter_enabled": int(cfg["mode"] in {"local_outlier_filter", "strict_local_outlier_filter"}),
+        "cbo_history_outlier_strict_enabled": int(cfg["mode"] == "strict_local_outlier_filter"),
+        "cbo_history_outlier_raw_rows": raw_rows,
+        "cbo_history_outlier_filtered_rows": 0,
+        "cbo_history_outlier_used_rows": raw_rows,
+        "cbo_history_outlier_filter_ratio": 0.0,
+        "cbo_history_outlier_neighbor_count_mean": 0.0,
+        "cbo_history_outlier_neighbor_count_max": 0,
+        "cbo_history_outlier_theta_radius": float(cfg["outlier_theta_radius"]),
+        "cbo_history_outlier_context_radius": float(cfg["outlier_context_radius"]),
+        "cbo_history_outlier_min_peers": int(cfg["outlier_min_peers"]),
+        "cbo_history_outlier_peer_count_mean": 0.0,
+        "cbo_history_outlier_peer_count_max": 0,
+        "cbo_history_outlier_protect_pressure": int(bool(cfg["outlier_protect_pressure"])),
+        "cbo_history_outlier_pressure_quantile": float(cfg["outlier_pressure_quantile"]),
+        "cbo_history_outlier_pressure_fields_available": "",
+        "cbo_history_outlier_candidate_rows": 0,
+        "cbo_history_outlier_protected_rows": 0,
+        "cbo_history_outlier_filtered_rows_before_protection": 0,
+        "cbo_history_outlier_filtered_rows_after_protection": 0,
+        "cbo_history_outlier_protected_ratio": 0.0,
+        "cbo_history_outlier_pressure_delay_threshold": np.nan,
+        "cbo_history_outlier_pressure_backlog_threshold": np.nan,
+        "cbo_history_outlier_pressure_unfinished_threshold": np.nan,
+        "cbo_history_outlier_pressure_violation_threshold": np.nan,
+        "cbo_history_outlier_residual_mean": 0.0,
+        "cbo_history_outlier_residual_max": 0.0,
+        "cbo_history_outlier_threshold": float(cfg["outlier_threshold"]),
+        "cbo_history_outlier_abs_threshold": float(cfg["outlier_abs_threshold"]),
+        "cbo_history_outlier_max_filter_ratio": float(cfg["outlier_max_filter_ratio"]),
+        "cbo_history_outlier_scale": cfg["outlier_scale"] if cfg["outlier_scale"] in {"mad", "iqr", "std"} else "mad",
+    }
+
+
+def _cbo_history_denoise_scale(values):
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] == 0:
+        return np.ones(0, dtype=float)
+    q25 = np.nanpercentile(arr, 25, axis=0)
+    q75 = np.nanpercentile(arr, 75, axis=0)
+    scale = q75 - q25
+    std = np.nanstd(arr, axis=0)
+    scale = np.where(np.isfinite(scale) & (scale > 1e-12), scale, std)
+    return np.where(np.isfinite(scale) & (scale > 1e-12), scale, 1.0).astype(float)
+
+
+def _cbo_history_denoise_stat(values, stat, trim_pct):
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return np.nan
+    if str(stat) == "trimmed_mean":
+        vals_sorted = np.sort(vals)
+        trim_n = int(np.floor(vals_sorted.size * float(trim_pct)))
+        if trim_n > 0 and vals_sorted.size - 2 * trim_n >= 2:
+            return float(np.mean(vals_sorted[trim_n:-trim_n]))
+    return float(np.median(vals))
+
+
+def _cbo_history_record_sources(records):
+    if not records:
+        return None
+    sources = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            return None
+        sources.append("warm" if bool(rec.get("cbo_warm_start_source")) else "local")
+    return sources
+
+
+def _cbo_history_source_eligible(agent, records, raw_rows, apply_to):
+    sources = _cbo_history_record_sources(records)
+    apply_to = str(apply_to or "all").strip().lower()
+    if sources is None and apply_to in {"local", "warm"}:
+        warning_key = f"history_denoise_source_unknown_{apply_to}"
+        warned = set(getattr(agent, "_cbo_history_denoise_warnings", set()) or set()) if agent is not None else set()
+        if warning_key not in warned:
+            print(f"[WARN] CBO history denoise apply-to={apply_to} requested but row source metadata is unavailable; falling back to all", flush=True)
+            warned.add(warning_key)
+            if agent is not None:
+                agent._cbo_history_denoise_warnings = warned
+        apply_to = "all"
+    eligible = np.ones(int(raw_rows), dtype=bool)
+    if sources is not None and apply_to == "local":
+        eligible = np.asarray([s == "local" for s in sources], dtype=bool)
+    elif sources is not None and apply_to == "warm":
+        eligible = np.asarray([s == "warm" for s in sources], dtype=bool)
+    return eligible, apply_to
+
+
+def _cbo_history_feature_parts(agent, x):
+    x_np = x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x, dtype=float)
+    if x_np.ndim != 2:
+        return x_np, 0, 0, np.zeros((0, 0), dtype=float), np.zeros((0, 0), dtype=float), np.ones(0), np.ones(0)
+    dim = min(max(0, int(getattr(agent, "dim", 0))), x_np.shape[1])
+    use_context = bool(getattr(agent, "use_context", False))
+    context_dim = min(max(0, int(getattr(agent, "context_dim", 0))) if use_context else 0, max(0, x_np.shape[1] - dim))
+    theta_x = x_np[:, :dim] if dim > 0 else np.zeros((x_np.shape[0], 0), dtype=float)
+    context_x = x_np[:, dim:dim + context_dim] if context_dim > 0 else np.zeros((x_np.shape[0], 0), dtype=float)
+    if dim > 0 and getattr(agent, "bounds", None) is not None:
+        bounds = getattr(agent, "bounds")
+        bounds_np = bounds.detach().cpu().numpy() if hasattr(bounds, "detach") else np.asarray(bounds, dtype=float)
+        theta_scale = np.asarray(bounds_np[1, :dim] - bounds_np[0, :dim], dtype=float)
+        theta_scale = np.where(np.isfinite(theta_scale) & (np.abs(theta_scale) > 1e-12), np.abs(theta_scale), 1.0)
+    else:
+        theta_scale = _cbo_history_denoise_scale(theta_x)
+    context_scale = _cbo_history_denoise_scale(context_x)
+    return x_np, dim, context_dim, theta_x, context_x, theta_scale, context_scale
+
+
+def _cbo_history_neighbor_indices(i, theta_x, context_x, theta_scale, context_scale, cfg_vals, raw_rows):
+    if theta_x.shape[1] > 0:
+        d_theta_vec = (theta_x - theta_x[i]) / theta_scale
+        d_theta = np.linalg.norm(d_theta_vec, axis=1)
+    else:
+        d_theta = np.zeros(raw_rows, dtype=float)
+    if context_x.shape[1] > 0:
+        d_context_vec = (context_x - context_x[i]) / context_scale
+        d_context = np.linalg.norm(d_context_vec, axis=1)
+    else:
+        d_context = np.zeros(raw_rows, dtype=float)
+    dist = float(cfg_vals["theta_weight"]) * d_theta + float(cfg_vals["context_weight"]) * d_context
+    dist = np.where(np.isfinite(dist), dist, np.inf)
+    idx = np.where(dist <= float(cfg_vals["radius"]))[0]
+    if idx.size:
+        idx = idx[np.argsort(dist[idx])[:int(cfg_vals["k"])]]
+    return idx
+
+
+def _cbo_history_strict_peer_indices(i, theta_x, context_x, theta_scale, context_scale, cfg_vals, raw_rows):
+    if theta_x.shape[1] > 0:
+        d_theta_vec = (theta_x - theta_x[i]) / theta_scale
+        d_theta = np.linalg.norm(d_theta_vec, axis=1)
+    else:
+        d_theta = np.zeros(raw_rows, dtype=float)
+    if context_x.shape[1] > 0:
+        d_context_vec = (context_x - context_x[i]) / context_scale
+        d_context = np.linalg.norm(d_context_vec, axis=1)
+    else:
+        d_context = np.zeros(raw_rows, dtype=float)
+    d_theta = np.where(np.isfinite(d_theta), d_theta, np.inf)
+    d_context = np.where(np.isfinite(d_context), d_context, np.inf)
+    mask = (d_theta <= float(cfg_vals["outlier_theta_radius"])) & (d_context <= float(cfg_vals["outlier_context_radius"]))
+    if bool(cfg_vals.get("outlier_use_leave_one_out", True)) and 0 <= int(i) < int(raw_rows):
+        mask[int(i)] = False
+    idx = np.where(mask)[0]
+    if idx.size:
+        combined = d_theta[idx] + d_context[idx]
+        idx = idx[np.argsort(combined)]
+    return idx, d_theta, d_context
+
+
+def _cbo_history_outlier_scale(values, mode):
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    vals = vals[np.isfinite(vals)]
+    if vals.size <= 1:
+        return 1e-9
+    med = float(np.median(vals))
+    mode = str(mode or "mad").strip().lower()
+    if mode == "iqr":
+        scale = (float(np.percentile(vals, 75)) - float(np.percentile(vals, 25))) / 1.349
+    elif mode == "std":
+        scale = float(np.std(vals))
+    else:
+        scale = float(np.median(np.abs(vals - med)) * 1.4826)
+    if not np.isfinite(scale) or scale <= 1e-9:
+        scale = 1e-9
+    return float(scale)
+
+
+def _cbo_history_json(value):
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _cbo_history_rec_metric(rec, names, default=np.nan):
+    metrics = rec.get("metrics") if isinstance(rec, dict) else None
+    for name in names:
+        try:
+            if isinstance(rec, dict) and name in rec and rec.get(name) is not None:
+                return float(rec.get(name))
+            if isinstance(metrics, dict) and name in metrics and metrics.get(name) is not None:
+                return float(metrics.get(name))
+        except Exception:
+            continue
+    return default
+
+
+def _cbo_history_pressure_field_names(fields_value):
+    fields = []
+    for part in str(fields_value or "").split(","):
+        name = part.strip()
+        if name:
+            fields.append(name)
+    return fields
+
+
+def _cbo_history_pressure_aliases(field):
+    key = str(field or "").strip()
+    low = key.lower()
+    if low in {"avg_delay", "delay", "avgdelay"}:
+        return ["Avg_Delay", "avg_delay", "delay"]
+    if low in {"backlog", "backlog_end"}:
+        return ["Backlog", "backlog"]
+    if low in {"unfinished_end", "unfinished", "unfinishedend"}:
+        return ["unfinished_end", "Unfinished_End", "window_unfinished_total"]
+    if low in {"violation", "violation_rate", "vio"}:
+        return ["Violation", "Violation_Rate", "violation_rate"]
+    return [key]
+
+
+def _cbo_history_pressure_thresholds(records, cfg_vals):
+    fields = _cbo_history_pressure_field_names(cfg_vals.get("outlier_pressure_fields"))
+    quantile = float(cfg_vals.get("outlier_pressure_quantile", 0.75))
+    thresholds = {}
+    values_by_field = {}
+    for field in fields:
+        aliases = _cbo_history_pressure_aliases(field)
+        vals = []
+        for rec in records:
+            if not isinstance(rec, dict):
+                vals.append(np.nan)
+                continue
+            vals.append(_cbo_history_rec_metric(rec, aliases, np.nan))
+        arr = np.asarray(vals, dtype=float)
+        finite = arr[np.isfinite(arr)]
+        if finite.size:
+            thresholds[field] = float(np.quantile(finite, quantile))
+            values_by_field[field] = arr
+    return thresholds, values_by_field
+
+
+def _cbo_history_pressure_threshold_stat(thresholds, aliases):
+    for name in aliases:
+        if name in thresholds:
+            return float(thresholds[name])
+    for key, value in thresholds.items():
+        low = str(key).lower()
+        if any(str(alias).lower() == low for alias in aliases):
+            return float(value)
+    return np.nan
+
+
+def _cbo_history_pressure_protection_for_index(idx_i, detail, thresholds, values_by_field, cfg_vals):
+    if not thresholds:
+        return False, ""
+    if bool(cfg_vals.get("outlier_protect_high_cost_only", True)):
+        try:
+            # Training y is reward (normally -cost), so higher cost than peers means y_i is lower than median_y.
+            if not (float(detail.get("y_i", np.nan)) < float(detail.get("median_y", np.nan))):
+                return False, ""
+        except Exception:
+            return False, ""
+    reasons = []
+    for field, threshold in thresholds.items():
+        arr = values_by_field.get(field)
+        if arr is None or idx_i >= len(arr):
+            continue
+        val = float(arr[idx_i])
+        if np.isfinite(val) and np.isfinite(float(threshold)) and val >= float(threshold):
+            reasons.append(f"{field}>=p{int(round(100.0 * float(cfg_vals.get('outlier_pressure_quantile', 0.75))))}")
+    return bool(reasons), ";".join(reasons)
+
+
+def _cbo_history_export_filtered_records(agent, selected_details, records):
+    try:
+        out_dir = os.path.abspath(globals().get("SCENARIO_SAVE_DIR", os.getcwd()))
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "outlier_filtered_records.csv")
+        columns = [
+            "current_iteration", "training_row_index", "source_type", "original_iteration",
+            "group_key", "history_mode", "y_i", "median_y", "residual", "scale",
+            "d_theta_min", "d_theta_mean", "d_theta_max", "d_context_min",
+            "d_context_mean", "d_context_max", "peer_count", "theta", "context",
+            "Eval_Cost", "Avg_Delay", "Avg_Energy", "Backlog", "unfinished_end",
+            "Violation", "candidate_outlier", "pressure_protected", "final_filtered",
+            "protect_reason", "pressure_quantile", "pressure_delay_threshold",
+            "pressure_backlog_threshold", "pressure_unfinished_threshold",
+            "pressure_violation_threshold",
+        ]
+        if not selected_details:
+            if not os.path.exists(path):
+                pd.DataFrame(columns=columns).to_csv(path, index=False, encoding="utf-8-sig")
+            if agent is not None:
+                agent.cbo_history_outlier_filtered_records_path = path
+            return
+        current_iteration = int(getattr(agent, "step_count", -1))
+        rows = []
+        for detail in selected_details:
+            idx_i = int(detail.get("index", -1))
+            rec = records[idx_i] if 0 <= idx_i < len(records) and isinstance(records[idx_i], dict) else {}
+            theta = rec.get("theta", detail.get("theta"))
+            context = rec.get("context", detail.get("context"))
+            eval_cost = _cbo_history_rec_metric(rec, ["cost", "Eval_Cost", "eval_cost"], np.nan)
+            if not np.isfinite(eval_cost):
+                try:
+                    eval_cost = -float(detail.get("y_i", np.nan))
+                except Exception:
+                    eval_cost = np.nan
+            rows.append({
+                "current_iteration": current_iteration,
+                "training_row_index": idx_i,
+                "source_type": "warm" if bool(rec.get("cbo_warm_start_source")) else "local",
+                "original_iteration": rec.get("bo_iter", ""),
+                "group_key": rec.get("group_key", ""),
+                "history_mode": rec.get("history_mode", ""),
+                "y_i": detail.get("y_i", np.nan),
+                "median_y": detail.get("median_y", np.nan),
+                "residual": detail.get("residual", np.nan),
+                "scale": detail.get("scale", np.nan),
+                "d_theta_min": detail.get("d_theta_min", np.nan),
+                "d_theta_mean": detail.get("d_theta_mean", np.nan),
+                "d_theta_max": detail.get("d_theta_max", np.nan),
+                "d_context_min": detail.get("d_context_min", np.nan),
+                "d_context_mean": detail.get("d_context_mean", np.nan),
+                "d_context_max": detail.get("d_context_max", np.nan),
+                "peer_count": detail.get("peer_count", 0),
+                "theta": _cbo_history_json(theta),
+                "context": _cbo_history_json(context),
+                "Eval_Cost": eval_cost,
+                "Avg_Delay": _cbo_history_rec_metric(rec, ["avg_delay", "Avg_Delay"], np.nan),
+                "Avg_Energy": _cbo_history_rec_metric(rec, ["avg_energy", "Avg_Energy"], np.nan),
+                "Backlog": _cbo_history_rec_metric(rec, ["backlog", "Backlog"], np.nan),
+                "unfinished_end": _cbo_history_rec_metric(rec, ["unfinished_end", "Unfinished_End"], np.nan),
+                "Violation": _cbo_history_rec_metric(rec, ["Violation", "Violation_Rate", "violation_rate"], np.nan),
+                "candidate_outlier": bool(detail.get("candidate_outlier", True)),
+                "pressure_protected": bool(detail.get("pressure_protected", False)),
+                "final_filtered": bool(detail.get("final_filtered", True)),
+                "protect_reason": detail.get("protect_reason", ""),
+                "pressure_quantile": detail.get("pressure_quantile", np.nan),
+                "pressure_delay_threshold": detail.get("pressure_delay_threshold", np.nan),
+                "pressure_backlog_threshold": detail.get("pressure_backlog_threshold", np.nan),
+                "pressure_unfinished_threshold": detail.get("pressure_unfinished_threshold", np.nan),
+                "pressure_violation_threshold": detail.get("pressure_violation_threshold", np.nan),
+            })
+        if rows:
+            pd.DataFrame(rows, columns=columns).to_csv(path, mode="a", header=not os.path.exists(path), index=False, encoding="utf-8-sig")
+            if agent is not None:
+                agent.cbo_history_outlier_filtered_records_path = path
+    except Exception as exc:
+        warned = set(getattr(agent, "_cbo_history_denoise_warnings", set()) or set()) if agent is not None else set()
+        key = "history_outlier_export_failed"
+        if key not in warned:
+            print(f"[WARN] failed to export CBO outlier filtered records: {type(exc).__name__}: {exc}", flush=True)
+            warned.add(key)
+            if agent is not None:
+                agent._cbo_history_denoise_warnings = warned
+
+
+def _cbo_history_store_stats(agent, stats):
+    if agent is not None:
+        agent.cbo_last_history_denoise_stats = dict(stats)
+        hist = dict(getattr(agent, "last_history_debug", {}) or {})
+        hist.update(stats)
+        agent.last_history_debug = hist
+
+
+def prepare_gp_training_data(agent, x, y, metadata=None, cfg=None):
+    records = list(metadata or [])
+    try:
+        raw_rows = int(y.shape[0])
+    except Exception:
+        raw_rows = len(records)
+    stats = _cbo_history_denoise_default_stats(agent, raw_rows=raw_rows, y_raw=y)
+    mode = stats["cbo_history_denoise_mode"]
+    if mode == "off" or raw_rows <= 0:
+        _cbo_history_store_stats(agent, stats)
+        return x, y, records, stats
+    if mode not in {"local_median", "local_outlier_filter", "strict_local_outlier_filter"}:
+        stats["cbo_history_denoise_mode"] = "off"
+        _cbo_history_store_stats(agent, stats)
+        return x, y, records, stats
+
+    y_np = y.detach().cpu().numpy() if hasattr(y, "detach") else np.asarray(y, dtype=float)
+    y_flat = np.asarray(y_np, dtype=float).reshape(-1)
+    x_np, dim, context_dim, theta_x, context_x, theta_scale, context_scale = _cbo_history_feature_parts(agent, x)
+    if x_np.ndim != 2 or y_flat.size != x_np.shape[0]:
+        _cbo_history_store_stats(agent, stats)
+        return x, y, records, stats
+
+    cfg_vals = _cbo_history_denoise_cfg(agent)
+    eligible, _apply_to = _cbo_history_source_eligible(agent, records, raw_rows, cfg_vals["apply_to"])
+
+    y_used = y_flat.copy()
+    neighbor_counts = []
+    applied = 0
+    residuals = []
+    outlier_candidates = []
+    outlier_details = {}
+    for i in range(raw_rows):
+        if not eligible[i] or not np.isfinite(y_flat[i]):
+            neighbor_counts.append(1)
+            continue
+        if mode == "strict_local_outlier_filter":
+            idx, d_theta_all, d_context_all = _cbo_history_strict_peer_indices(i, theta_x, context_x, theta_scale, context_scale, cfg_vals, raw_rows)
+            min_required = int(cfg_vals["outlier_min_peers"])
+        else:
+            idx = _cbo_history_neighbor_indices(i, theta_x, context_x, theta_scale, context_scale, cfg_vals, raw_rows)
+            d_theta_all = None
+            d_context_all = None
+            min_required = int(cfg_vals["min_neighbors"])
+        idx = np.asarray([j for j in idx.tolist() if np.isfinite(y_flat[j])], dtype=int)
+        neighbor_counts.append(int(idx.size))
+        if idx.size >= min_required:
+            med = float(np.median(y_flat[idx]))
+            residual = abs(float(y_flat[i]) - med)
+            residuals.append(float(residual))
+            if mode == "local_median":
+                val = _cbo_history_denoise_stat(y_flat[idx], cfg_vals["stat"], cfg_vals["trim_pct"])
+                if np.isfinite(val):
+                    applied += 1
+                    y_used[i] = float(val)
+            else:
+                scale = _cbo_history_outlier_scale(y_flat[idx], cfg_vals["outlier_scale"])
+                if (
+                    residual > float(cfg_vals["outlier_abs_threshold"])
+                    and residual > float(cfg_vals["outlier_threshold"]) * float(scale)
+                ):
+                    outlier_candidates.append((float(residual), int(i)))
+                    if mode == "strict_local_outlier_filter":
+                        d_theta_peer = d_theta_all[idx] if d_theta_all is not None and idx.size else np.asarray([], dtype=float)
+                        d_context_peer = d_context_all[idx] if d_context_all is not None and idx.size else np.asarray([], dtype=float)
+                        outlier_details[int(i)] = {
+                            "index": int(i),
+                            "y_i": float(y_flat[i]),
+                            "median_y": float(med),
+                            "residual": float(residual),
+                            "scale": float(scale),
+                            "peer_count": int(idx.size),
+                            "d_theta_min": float(np.min(d_theta_peer)) if d_theta_peer.size else np.nan,
+                            "d_theta_mean": float(np.mean(d_theta_peer)) if d_theta_peer.size else np.nan,
+                            "d_theta_max": float(np.max(d_theta_peer)) if d_theta_peer.size else np.nan,
+                            "d_context_min": float(np.min(d_context_peer)) if d_context_peer.size else np.nan,
+                            "d_context_mean": float(np.mean(d_context_peer)) if d_context_peer.size else np.nan,
+                            "d_context_max": float(np.max(d_context_peer)) if d_context_peer.size else np.nan,
+                            "theta": theta_x[i].tolist() if theta_x.shape[1] else [],
+                            "context": context_x[i].tolist() if context_x.shape[1] else [],
+                        }
+
+    if mode in {"local_outlier_filter", "strict_local_outlier_filter"}:
+        max_filter = int(np.floor(float(cfg_vals["outlier_max_filter_ratio"]) * float(raw_rows)))
+        outlier_candidates.sort(key=lambda item: item[0], reverse=True)
+        selected = outlier_candidates[:max(0, max_filter)]
+        pressure_thresholds = {}
+        pressure_values = {}
+        protected_indices = set()
+        protected_rows = 0
+        if mode == "strict_local_outlier_filter" and bool(cfg_vals.get("outlier_protect_pressure", False)):
+            pressure_thresholds, pressure_values = _cbo_history_pressure_thresholds(records, cfg_vals)
+            if not pressure_thresholds:
+                warning_key = "history_outlier_pressure_fields_unavailable"
+                warned = set(getattr(agent, "_cbo_history_denoise_warnings", set()) or set()) if agent is not None else set()
+                if warning_key not in warned:
+                    print("[WARN] CBO strict pressure protection enabled but no pressure fields are available; using unprotected strict filter", flush=True)
+                    warned.add(warning_key)
+                    if agent is not None:
+                        agent._cbo_history_denoise_warnings = warned
+            else:
+                for _residual, idx_i in selected:
+                    detail = outlier_details.get(int(idx_i), {})
+                    is_protected, reason = _cbo_history_pressure_protection_for_index(int(idx_i), detail, pressure_thresholds, pressure_values, cfg_vals)
+                    if is_protected:
+                        protected_indices.add(int(idx_i))
+                        protected_rows += 1
+                        if int(idx_i) in outlier_details:
+                            outlier_details[int(idx_i)]["pressure_protected"] = True
+                            outlier_details[int(idx_i)]["protect_reason"] = reason
+        keep_mask = np.ones(raw_rows, dtype=bool)
+        for _residual, idx_i in selected:
+            if int(idx_i) not in protected_indices:
+                keep_mask[idx_i] = False
+        filtered_rows = int(np.sum(~keep_mask))
+        min_fit_rows = max(5, int(getattr(agent, "dim", 0)) + 2)
+        if raw_rows - filtered_rows < min_fit_rows:
+            warning_key = "history_outlier_filter_too_few_rows"
+            warned = set(getattr(agent, "_cbo_history_denoise_warnings", set()) or set()) if agent is not None else set()
+            if warning_key not in warned:
+                print(
+                    f"[WARN] CBO {mode} would leave {raw_rows - filtered_rows} rows "
+                    f"(< {min_fit_rows}); using unfiltered GP training data",
+                    flush=True,
+                )
+                warned.add(warning_key)
+                if agent is not None:
+                    agent._cbo_history_denoise_warnings = warned
+            keep_mask[:] = True
+            filtered_rows = 0
+            protected_rows = 0
+            protected_indices = set()
+        if hasattr(x, "detach"):
+            keep_tensor = torch.as_tensor(keep_mask, dtype=torch.bool, device=x.device)
+            x_out = x[keep_tensor]
+            y_out = y[keep_tensor]
+        else:
+            x_out = np.asarray(x)[keep_mask]
+            y_out = np.asarray(y)[keep_mask]
+        records_out = [rec for rec, keep in zip(records, keep_mask.tolist()) if keep]
+        residual_arr = np.asarray(residuals, dtype=float)
+        selected_ids = {int(idx_i) for _residual, idx_i in selected}
+        delay_threshold = _cbo_history_pressure_threshold_stat(pressure_thresholds, ["Avg_Delay", "avg_delay", "delay"])
+        backlog_threshold = _cbo_history_pressure_threshold_stat(pressure_thresholds, ["Backlog", "backlog"])
+        unfinished_threshold = _cbo_history_pressure_threshold_stat(pressure_thresholds, ["unfinished_end", "Unfinished_End", "window_unfinished_total"])
+        violation_threshold = _cbo_history_pressure_threshold_stat(pressure_thresholds, ["Violation", "Violation_Rate", "violation_rate"])
+        selected_details = []
+        for _residual, idx_i in outlier_candidates:
+            idx_i = int(idx_i)
+            if idx_i not in outlier_details:
+                continue
+            detail = dict(outlier_details[idx_i])
+            detail["candidate_outlier"] = True
+            detail["pressure_protected"] = bool(idx_i in protected_indices)
+            detail["final_filtered"] = bool(idx_i in selected_ids and not keep_mask[idx_i])
+            if idx_i not in selected_ids and not detail.get("protect_reason"):
+                detail["protect_reason"] = "max_filter_ratio_cap"
+            detail.setdefault("protect_reason", "")
+            detail["pressure_quantile"] = float(cfg_vals.get("outlier_pressure_quantile", np.nan))
+            detail["pressure_delay_threshold"] = delay_threshold
+            detail["pressure_backlog_threshold"] = backlog_threshold
+            detail["pressure_unfinished_threshold"] = unfinished_threshold
+            detail["pressure_violation_threshold"] = violation_threshold
+            selected_details.append(detail)
+        if mode == "strict_local_outlier_filter" and bool(cfg_vals.get("outlier_export_filtered", True)):
+            _cbo_history_export_filtered_records(agent, selected_details, records)
+        stats.update({
+            "cbo_history_outlier_filter_enabled": 1,
+            "cbo_history_outlier_strict_enabled": int(mode == "strict_local_outlier_filter"),
+            "cbo_history_outlier_raw_rows": int(raw_rows),
+            "cbo_history_outlier_filtered_rows": int(filtered_rows),
+            "cbo_history_outlier_used_rows": int(raw_rows - filtered_rows),
+            "cbo_history_outlier_filter_ratio": float(filtered_rows / max(1, raw_rows)),
+            "cbo_history_outlier_neighbor_count_mean": float(np.mean(neighbor_counts)) if neighbor_counts else 0.0,
+            "cbo_history_outlier_neighbor_count_max": int(max(neighbor_counts)) if neighbor_counts else 0,
+            "cbo_history_outlier_theta_radius": float(cfg_vals["outlier_theta_radius"]),
+            "cbo_history_outlier_context_radius": float(cfg_vals["outlier_context_radius"]),
+            "cbo_history_outlier_min_peers": int(cfg_vals["outlier_min_peers"]),
+            "cbo_history_outlier_peer_count_mean": float(np.mean(neighbor_counts)) if neighbor_counts else 0.0,
+            "cbo_history_outlier_peer_count_max": int(max(neighbor_counts)) if neighbor_counts else 0,
+            "cbo_history_outlier_protect_pressure": int(bool(cfg_vals.get("outlier_protect_pressure", False))),
+            "cbo_history_outlier_pressure_quantile": float(cfg_vals.get("outlier_pressure_quantile", 0.75)),
+            "cbo_history_outlier_pressure_fields_available": ",".join(sorted(pressure_thresholds.keys())),
+            "cbo_history_outlier_candidate_rows": int(len(outlier_candidates)),
+            "cbo_history_outlier_protected_rows": int(protected_rows),
+            "cbo_history_outlier_filtered_rows_before_protection": int(len(selected)),
+            "cbo_history_outlier_filtered_rows_after_protection": int(filtered_rows),
+            "cbo_history_outlier_protected_ratio": float(protected_rows / max(1, len(selected))),
+            "cbo_history_outlier_pressure_delay_threshold": float(delay_threshold) if np.isfinite(delay_threshold) else np.nan,
+            "cbo_history_outlier_pressure_backlog_threshold": float(backlog_threshold) if np.isfinite(backlog_threshold) else np.nan,
+            "cbo_history_outlier_pressure_unfinished_threshold": float(unfinished_threshold) if np.isfinite(unfinished_threshold) else np.nan,
+            "cbo_history_outlier_pressure_violation_threshold": float(violation_threshold) if np.isfinite(violation_threshold) else np.nan,
+            "cbo_history_outlier_residual_mean": float(np.mean(residual_arr)) if residual_arr.size else 0.0,
+            "cbo_history_outlier_residual_max": float(np.max(residual_arr)) if residual_arr.size else 0.0,
+            "cbo_history_outlier_threshold": float(cfg_vals["outlier_threshold"]),
+            "cbo_history_outlier_abs_threshold": float(cfg_vals["outlier_abs_threshold"]),
+            "cbo_history_outlier_max_filter_ratio": float(cfg_vals["outlier_max_filter_ratio"]),
+            "cbo_history_outlier_scale": cfg_vals["outlier_scale"] if cfg_vals["outlier_scale"] in {"mad", "iqr", "std"} else "mad",
+            "cbo_history_denoise_y_used_mean": _cbo_history_denoise_default_stats(agent, raw_rows=raw_rows, y_raw=y, y_used=y_out)["cbo_history_denoise_y_used_mean"],
+        })
+        _cbo_history_store_stats(agent, stats)
+        return x_out, y_out, records_out, stats
+
+    y_out = torch.as_tensor(y_used.reshape(y_np.shape), dtype=y.dtype, device=y.device) if hasattr(y, "device") else y_used.reshape(y_np.shape)
+    delta = np.abs(y_used - y_flat)
+    finite_delta = delta[np.isfinite(delta)]
+    stats.update({
+        "cbo_history_denoise_smoothed_rows": int(applied),
+        "cbo_history_denoise_unsmoothed_rows": int(raw_rows - applied),
+        "cbo_history_denoise_smoothed_ratio": float(applied / max(1, raw_rows)),
+        "cbo_history_denoise_neighbor_count_mean": float(np.mean(neighbor_counts)) if neighbor_counts else 0.0,
+        "cbo_history_denoise_neighbor_count_max": int(max(neighbor_counts)) if neighbor_counts else 0,
+        "cbo_history_denoise_abs_delta_mean": float(np.mean(finite_delta)) if finite_delta.size else 0.0,
+        "cbo_history_denoise_abs_delta_max": float(np.max(finite_delta)) if finite_delta.size else 0.0,
+        "cbo_history_denoise_y_used_mean": _cbo_history_denoise_default_stats(agent, raw_rows=raw_rows, y_raw=y, y_used=y_out)["cbo_history_denoise_y_used_mean"],
+    })
+    _cbo_history_store_stats(agent, stats)
+    return x, y_out, records, stats
+
+
+def denoise_training_targets(agent, x, y, metadata=None, cfg=None):
+    _x_out, y_out, _records_out, stats = prepare_gp_training_data(agent, x, y, metadata=metadata, cfg=cfg)
+    return y_out, stats
+
+
 def _node_count_backlog(nodes):
     return int(sum(len(n.ready_queue) + len(n.running_tasks) for n in nodes))
 
@@ -2267,6 +2939,29 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_surprise_z_threshold = float(group_cfg.get("cbo_surprise_z_threshold", _cfg_cbo_float("CBO_SURPRISE_Z_THRESHOLD", 2.0)))
     agent.cbo_surprise_cost_gap_pct = float(group_cfg.get("cbo_surprise_cost_gap_pct", _cfg_cbo_float("CBO_SURPRISE_COST_GAP_PCT", 0.03)))
     agent.cbo_sigma_floor = float(group_cfg.get("cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 1e-6)))
+    agent.cbo_history_denoise_mode = str(group_cfg.get("cbo_history_denoise_mode", _cfg_cbo_str("CBO_HISTORY_DENOISE_MODE", "off"))).strip().lower()
+    agent.cbo_history_denoise_k = int(group_cfg.get("cbo_history_denoise_k", _cfg_cbo_int("CBO_HISTORY_DENOISE_K", 7)))
+    agent.cbo_history_denoise_radius = float(group_cfg.get("cbo_history_denoise_radius", _cfg_cbo_float("CBO_HISTORY_DENOISE_RADIUS", 0.12)))
+    agent.cbo_history_denoise_min_neighbors = int(group_cfg.get("cbo_history_denoise_min_neighbors", _cfg_cbo_int("CBO_HISTORY_DENOISE_MIN_NEIGHBORS", 3)))
+    agent.cbo_history_denoise_context_weight = float(group_cfg.get("cbo_history_denoise_context_weight", _cfg_cbo_float("CBO_HISTORY_DENOISE_CONTEXT_WEIGHT", 1.0)))
+    agent.cbo_history_denoise_theta_weight = float(group_cfg.get("cbo_history_denoise_theta_weight", _cfg_cbo_float("CBO_HISTORY_DENOISE_THETA_WEIGHT", 1.0)))
+    agent.cbo_history_denoise_stat = str(group_cfg.get("cbo_history_denoise_stat", _cfg_cbo_str("CBO_HISTORY_DENOISE_STAT", "median"))).strip().lower()
+    agent.cbo_history_denoise_trim_pct = float(group_cfg.get("cbo_history_denoise_trim_pct", _cfg_cbo_float("CBO_HISTORY_DENOISE_TRIM_PCT", 0.1)))
+    agent.cbo_history_denoise_apply_to = str(group_cfg.get("cbo_history_denoise_apply_to", _cfg_cbo_str("CBO_HISTORY_DENOISE_APPLY_TO", "all"))).strip().lower()
+    agent.cbo_history_outlier_threshold = float(group_cfg.get("cbo_history_outlier_threshold", _cfg_cbo_float("CBO_HISTORY_OUTLIER_THRESHOLD", 3.0)))
+    agent.cbo_history_outlier_abs_threshold = float(group_cfg.get("cbo_history_outlier_abs_threshold", _cfg_cbo_float("CBO_HISTORY_OUTLIER_ABS_THRESHOLD", 500.0)))
+    agent.cbo_history_outlier_max_filter_ratio = float(group_cfg.get("cbo_history_outlier_max_filter_ratio", _cfg_cbo_float("CBO_HISTORY_OUTLIER_MAX_FILTER_RATIO", 0.2)))
+    agent.cbo_history_outlier_scale = str(group_cfg.get("cbo_history_outlier_scale", _cfg_cbo_str("CBO_HISTORY_OUTLIER_SCALE", "mad"))).strip().lower()
+    agent.cbo_history_outlier_theta_radius = float(group_cfg.get("cbo_history_outlier_theta_radius", _cfg_cbo_float("CBO_HISTORY_OUTLIER_THETA_RADIUS", 0.12)))
+    agent.cbo_history_outlier_context_radius = float(group_cfg.get("cbo_history_outlier_context_radius", _cfg_cbo_float("CBO_HISTORY_OUTLIER_CONTEXT_RADIUS", 0.50)))
+    agent.cbo_history_outlier_min_peers = int(group_cfg.get("cbo_history_outlier_min_peers", _cfg_cbo_int("CBO_HISTORY_OUTLIER_MIN_PEERS", 3)))
+    agent.cbo_history_outlier_use_leave_one_out = bool(group_cfg.get("cbo_history_outlier_use_leave_one_out", getattr(CFG, "CBO_HISTORY_OUTLIER_USE_LEAVE_ONE_OUT", True)))
+    agent.cbo_history_outlier_export_filtered = bool(group_cfg.get("cbo_history_outlier_export_filtered", getattr(CFG, "CBO_HISTORY_OUTLIER_EXPORT_FILTERED", True)))
+    agent.cbo_history_outlier_protect_pressure = bool(group_cfg.get("cbo_history_outlier_protect_pressure", getattr(CFG, "CBO_HISTORY_OUTLIER_PROTECT_PRESSURE", False)))
+    agent.cbo_history_outlier_pressure_quantile = float(group_cfg.get("cbo_history_outlier_pressure_quantile", _cfg_cbo_float("CBO_HISTORY_OUTLIER_PRESSURE_QUANTILE", 0.75)))
+    agent.cbo_history_outlier_protect_high_cost_only = bool(group_cfg.get("cbo_history_outlier_protect_high_cost_only", getattr(CFG, "CBO_HISTORY_OUTLIER_PROTECT_HIGH_COST_ONLY", True)))
+    agent.cbo_history_outlier_pressure_fields = str(group_cfg.get("cbo_history_outlier_pressure_fields", getattr(CFG, "CBO_HISTORY_OUTLIER_PRESSURE_FIELDS", "Avg_Delay,Backlog,unfinished_end,Violation")))
+    agent.cbo_last_history_denoise_stats = _cbo_history_denoise_default_stats(agent, raw_rows=0)
     agent.cbo_radius_reset = float(group_cfg.get("cbo_radius_reset", _cfg_cbo_float("CBO_RADIUS_RESET", 0.12)))
     agent.cbo_radius_min_stuck_rounds = int(group_cfg.get("cbo_radius_min_stuck_rounds", _cfg_cbo_int("CBO_RADIUS_MIN_STUCK_ROUNDS", 10)))
     agent.cbo_rebound_window = int(group_cfg.get("cbo_rebound_window", _cfg_cbo_int("CBO_REBOUND_WINDOW", 20)))
@@ -2621,6 +3316,8 @@ def _refactor_collect_samples(self, state=None):
         macro_current = macro_current or {}
         if selected_from_macro_pool_count is None:
             selected_from_macro_pool_count = int(macro_count)
+        warm_count = sum(1 for rec in list(pool or []) if _cbo_is_warm_record(rec))
+        local_count = int(len(list(pool or [])) - warm_count)
         self.last_history_debug = {
             "history_select_mode": select_mode,
             "effective_history_mode": str(getattr(self, "history_mode", _cfg_history_mode("all"))),
@@ -2631,6 +3328,9 @@ def _refactor_collect_samples(self, state=None):
             "selected_elite_count": int(elite_count),
             "selected_diverse_count": int(diverse_count),
             "selected_total_count": int(len(pool)),
+            "selected_warm_rows_count": int(warm_count),
+            "selected_local_rows_count": int(local_count),
+            "cbo_warm_start_used_rows": int(warm_count),
             "cbo_macro_gate_mode": str(getattr(self, "cbo_macro_gate_mode", _cfg_cbo_str("CBO_MACRO_GATE_MODE", "off"))),
             "macro_total_arrivals_norm": macro_current.get("total_arrivals_norm"),
             "macro_rt_ratio": macro_current.get("rt_ratio"),
@@ -3588,6 +4288,7 @@ def _stability_ask_contextual(self, state=None, context=None):
     if tr_mode == "off":
         theta = _ORIG_AGENT_ASK_CONTEXTUAL_STABILITY(self, state=state, context=context)
         hist = dict(getattr(self, "last_history_debug", {}) or {})
+        hist.update(dict(getattr(self, "cbo_last_history_denoise_stats", {}) or {}))
         self.last_debug_info = {**getattr(self, "last_debug_info", {}), **hist,
                                 "cbo_tr_mode": "off", "cbo_tr_anchor_mode": getattr(self, "cbo_tr_anchor_mode", "posterior_mean"),
                                 "cbo_tr_radius": float(getattr(self, "trust_radius", np.nan)),
@@ -3698,6 +4399,7 @@ def _stability_ask_contextual(self, state=None, context=None):
         "model_state_dict": gp.state_dict(),
     })
     hist = dict(getattr(self, "last_history_debug", {}) or {})
+    hist.update(dict(getattr(self, "cbo_last_history_denoise_stats", {}) or {}))
     recent_records = [self._unpack_sample(s) for s in getattr(self, "local_recent", [])]
     recent_best = list(max(recent_records, key=lambda r: float(r.get("y", -1e300))).get("theta", [])) if recent_records else None
     robust_theta = None
@@ -4027,6 +4729,347 @@ def _cbo_dump_candidate_diagnostics(output_dir, iteration, safe_info, group_key=
         print(f"[WARN] failed to dump candidate diagnostics: {type(exc).__name__}: {exc}", flush=True)
 
 
+def _cbo_ws_json(value, default=None):
+    if value is None:
+        return default
+    try:
+        if isinstance(value, float) and np.isnan(value):
+            return default
+    except Exception:
+        pass
+    if isinstance(value, (list, tuple, dict)):
+        return value
+    text = str(value).strip()
+    if text == "" or text.lower() in {"nan", "none", "null"}:
+        return default
+    try:
+        return json.loads(text)
+    except Exception:
+        return default
+
+
+def _cbo_ws_float(value, default=np.nan):
+    try:
+        if value is None:
+            return default
+        out = float(value)
+        return out if np.isfinite(out) else default
+    except Exception:
+        return default
+
+
+def _cbo_ws_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        out = int(float(value))
+        return out
+    except Exception:
+        return default
+
+
+def _cbo_warm_context_feature_names(group_cfg):
+    try:
+        mode = str((group_cfg or {}).get("context_mode", "legacy") or "legacy").strip().lower()
+        if mode in set(LITE_CONTEXT_MODE_SPECS.keys()) | {"state_lite", "cbo_lite"}:
+            if mode in {"state_lite", "cbo_lite"}:
+                mode = "lite"
+            return list(lite_context_feature_names(mode))
+    except Exception:
+        pass
+    try:
+        agent_kwargs = (group_cfg or {}).get("agent_kwargs", {}) or {}
+        if int(agent_kwargs.get("context_dim", 0) or 0) <= 0:
+            return []
+    except Exception:
+        pass
+    return list(getattr(CFG, "CONTEXT_FEATURE_NAMES", []))
+
+
+def _cbo_warm_history_files(path_or_dir):
+    spec = str(path_or_dir or "").strip()
+    if not spec:
+        return []
+    path = os.path.abspath(spec)
+    if os.path.isfile(path):
+        return [path]
+    if not os.path.isdir(path):
+        print(f"[WARN] CBO warm-start history path not found: {path}", flush=True)
+        return []
+    direct = os.path.join(path, "bo_warm_history.csv")
+    if os.path.isfile(direct):
+        return [direct]
+    found = []
+    for root, _, files in os.walk(path):
+        if "bo_warm_history.csv" in files:
+            found.append(os.path.join(root, "bo_warm_history.csv"))
+    return sorted(found)
+
+
+def _cbo_row_compatible(row, target):
+    checks = [
+        ("control_dim", _cbo_ws_int(row.get("control_dim"), -1), int(target["control_dim"])),
+        ("context_dim", _cbo_ws_int(row.get("context_dim"), -1), int(target["context_dim"])),
+        ("context_feature_names", list(_cbo_ws_json(row.get("context_feature_names"), []) or []), list(target["context_feature_names"])),
+        ("scheduler_tradeoff_mode", str(row.get("scheduler_tradeoff_mode", "")), str(target["scheduler_tradeoff_mode"])),
+        ("scheduler_score_norm_mode", str(row.get("scheduler_score_norm_mode", "")), str(target["scheduler_score_norm_mode"])),
+    ]
+    for name, got, want in checks:
+        if got != want:
+            return False, f"{name} mismatch source={got} target={want}"
+    src_le = _cbo_ws_float(row.get("scheduler_le_scale"), np.nan)
+    tgt_le = float(target["scheduler_le_scale"])
+    if not np.isfinite(src_le) or abs(src_le - tgt_le) > 1e-9:
+        return False, f"scheduler_le_scale mismatch source={src_le} target={tgt_le}"
+    return True, "ok"
+
+
+def _cbo_select_warm_rows(rows, mode, target_context, topk, max_rows):
+    mode = str(mode or "none").strip().lower()
+    rows = list(rows)
+    if mode == "similar_topk" and target_context is not None:
+        tgt = np.asarray(list(target_context), dtype=float)
+        scored = []
+        for idx, row in enumerate(rows):
+            ctx = _cbo_ws_json(row.get("context_vector"), None)
+            if not isinstance(ctx, (list, tuple)):
+                dist = float("inf")
+            else:
+                arr = np.asarray(list(ctx), dtype=float)
+                if arr.size != tgt.size:
+                    dist = float("inf")
+                else:
+                    dist = float(np.linalg.norm(arr - tgt))
+            scored.append((dist, idx, row))
+        scored.sort(key=lambda x: (x[0], x[1]))
+        rows = [r for _, _, r in scored[:max(1, int(topk))]]
+    return rows[:max(0, int(max_rows))]
+
+
+def _cbo_warm_record_from_row(agent, row):
+    theta = _cbo_ws_json(row.get("control_theta"), None)
+    if not isinstance(theta, (list, tuple)):
+        theta = _cbo_ws_json(row.get("deployed_theta"), None)
+    context = _cbo_ws_json(row.get("context_vector"), None)
+    cost = _cbo_ws_float(row.get("BO_Training_Cost"), np.nan)
+    if not np.isfinite(cost):
+        cost = _cbo_ws_float(row.get("Eval_Cost"), np.nan)
+    if not isinstance(theta, (list, tuple)) or not np.isfinite(cost):
+        return None
+    rec = agent._pack_sample(list(theta), -float(cost), state=None, context=context)
+    rec["feedback_confidence"] = 1.0
+    rec["bo_iter"] = _cbo_ws_int(row.get("iteration"), None)
+    rec["group_key"] = str(row.get("selected_key", row.get("method", "warm_source")) or "warm_source")
+    rec["history_mode"] = str(getattr(agent, "history_mode", _cfg_history_mode()))
+    rec["cbo_warm_start_source"] = True
+    rec["source_scene_label"] = str(row.get("source_scene_label", "") or "")
+    rec["result_file_path"] = str(row.get("result_file_path", "") or "")
+    metrics = {
+        "cost": _cbo_ws_float(row.get("Eval_Cost"), np.nan),
+        "bo_training_cost": float(cost),
+        "avg_delay": _cbo_ws_float(row.get("Avg_Delay"), np.nan),
+        "avg_energy": _cbo_ws_float(row.get("Avg_Energy"), np.nan),
+        "unfinished_end": _cbo_ws_float(row.get("unfinished_end"), np.nan),
+        "unfinished_rate": _cbo_ws_float(row.get("unfinished_rate"), np.nan),
+    }
+    rec["metrics"] = {k: v for k, v in metrics.items() if not (isinstance(v, float) and not np.isfinite(v))}
+    return rec
+
+
+def _cbo_inject_warm_start(agent, group_key, group_cfg, target_context=None):
+    mode = str(getattr(CFG, "CBO_WARM_START_MODE", "none") or "none").strip().lower()
+    status = {
+        "cbo_warm_start_enabled": bool(mode != "none"),
+        "cbo_warm_start_mode": mode,
+        "cbo_warm_start_loaded_rows": 0,
+        "cbo_warm_start_history_path": str(getattr(CFG, "CBO_WARM_START_HISTORY", "") or ""),
+    }
+    if agent is None or mode == "none" or not _is_cbo_method_key(group_key, group_cfg):
+        return status
+    target = {
+        "control_dim": int(getattr(agent, "dim", 0) or 0),
+        "context_dim": int(getattr(agent, "context_dim", 0) or 0),
+        "context_feature_names": _cbo_warm_context_feature_names(group_cfg),
+        "scheduler_tradeoff_mode": str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy")),
+        "scheduler_score_norm_mode": str(getattr(CFG, "SCHEDULER_SCORE_NORM_MODE", "legacy")),
+        "scheduler_le_scale": float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)),
+    }
+    files = _cbo_warm_history_files(getattr(CFG, "CBO_WARM_START_HISTORY", ""))
+    if not files:
+        print("[WARN] CBO warm-start enabled but no bo_warm_history.csv files were found", flush=True)
+        return status
+    rows = []
+    warn_counts = {}
+    for csv_path in files:
+        try:
+            df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        except Exception as exc:
+            print(f"[WARN] failed to read warm-start history {csv_path}: {type(exc).__name__}: {exc}", flush=True)
+            continue
+        for row in df.to_dict("records"):
+            ok, reason = _cbo_row_compatible(row, target)
+            if not ok:
+                warn_counts[reason] = warn_counts.get(reason, 0) + 1
+                continue
+            row["_warm_history_file"] = csv_path
+            rows.append(row)
+    for reason, count in sorted(warn_counts.items())[:8]:
+        print(f"[WARN] skipped {count} CBO warm-start rows: {reason}", flush=True)
+    rows = _cbo_select_warm_rows(
+        rows,
+        mode=mode,
+        target_context=target_context,
+        topk=int(getattr(CFG, "CBO_WARM_START_TOPK", 100)),
+        max_rows=int(getattr(CFG, "CBO_WARM_START_MAX_ROWS", 300)),
+    )
+    loaded = 0
+    archive_key = "CBO_WARM_START"
+    local_capacity = int(getattr(getattr(agent, "local_recent", None), "maxlen", 0) or 0)
+    recent_budget = max(0, min(local_capacity, len(rows)))
+    archive_rows = rows[:-recent_budget] if recent_budget else rows
+    recent_rows = rows[-recent_budget:] if recent_budget else []
+    for row in archive_rows:
+        rec = _cbo_warm_record_from_row(agent, row)
+        if rec is None:
+            continue
+        agent.local_archive[archive_key].append(rec)
+        loaded += 1
+    for row in recent_rows:
+        rec = _cbo_warm_record_from_row(agent, row)
+        if rec is None:
+            continue
+        agent.local_recent.append(rec)
+        loaded += 1
+    all_recs = []
+    for bucket in getattr(agent, "local_archive", {}).values():
+        all_recs.extend(list(bucket))
+    all_recs.extend(list(getattr(agent, "local_recent", [])))
+    warm_recs = [r for r in all_recs if isinstance(r, dict) and bool(r.get("cbo_warm_start_source"))]
+    if warm_recs:
+        best = max(warm_recs, key=lambda r: float(r.get("y", -1e300)))
+        agent.prev_best = list(best.get("theta", []))
+        agent.prev_best_value = float(best.get("y", -1e300))
+        agent.prev_best_iter = _cbo_ws_int(best.get("bo_iter"), None)
+    status["cbo_warm_start_loaded_rows"] = int(loaded)
+    status["cbo_warm_start_history_path"] = ";".join(files)
+    try:
+        agent.cbo_warm_start_loaded_rows = int(loaded)
+        agent.cbo_warm_start_history_path = status["cbo_warm_start_history_path"]
+        agent.cbo_warm_start_mode = mode
+    except Exception:
+        pass
+    print(
+        f"[CBO-WARM-START] method={group_key} mode={mode} loaded_rows={loaded} files={len(files)}",
+        flush=True,
+    )
+    return status
+
+
+def _cbo_is_warm_record(rec):
+    return isinstance(rec, dict) and bool(rec.get("cbo_warm_start_source"))
+
+
+def _cbo_warm_log_get(log, key, idx, default=None):
+    vals = log.get(key, []) if isinstance(log, dict) else []
+    if idx < len(vals):
+        return vals[idx]
+    return default
+
+
+def _cbo_warm_json_dump(value):
+    try:
+        if value is None:
+            return ""
+        if isinstance(value, float) and np.isnan(value):
+            return ""
+    except Exception:
+        pass
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _cbo_warm_group_dims(group_cfg):
+    agent_kwargs = (group_cfg or {}).get("agent_kwargs", {}) or {}
+    try:
+        control_dim = int(len((group_cfg or {}).get("fixed_theta", []))) if (group_cfg or {}).get("fixed_theta") is not None else int(agent_kwargs.get("dim", 0) or 0)
+    except Exception:
+        control_dim = int(agent_kwargs.get("dim", 0) or 0)
+    try:
+        context_dim = int(agent_kwargs.get("context_dim", 0) or 0)
+    except Exception:
+        context_dim = 0
+    return control_dim, context_dim
+
+
+def export_bo_warm_history_csv(group_logs, output_dir=None, selected_keys=None, groups=None):
+    output_dir = os.path.abspath(output_dir or SCENARIO_SAVE_DIR)
+    os.makedirs(output_dir, exist_ok=True)
+    source_label = str(getattr(CFG, "CBO_WARM_START_LABEL", "") or "")
+    if not source_label:
+        source_label = os.path.basename(os.path.abspath(output_dir))
+    task_probs = dict(getattr(CFG, "TASK_TYPE_PROBS", {}) or {})
+    lambda_schedule = list(getattr(CFG, "LAMBDA_SCHEDULE", []) or [])
+    lambda_value = ""
+    if len(lambda_schedule) == 1:
+        try:
+            lambda_value = float(lambda_schedule[0][2])
+        except Exception:
+            lambda_value = ""
+    rows = []
+    for group_key, info in (group_logs or {}).items():
+        group_cfg = (groups or {}).get(group_key, {}) if isinstance(groups, dict) else {}
+        control_dim, context_dim = _cbo_warm_group_dims(group_cfg)
+        fallback_context_names = _cbo_warm_context_feature_names(group_cfg)
+        result_path = os.path.join(output_dir, f"{group_key}_round_summary_轮次汇总.csv")
+        for repeat_idx, log in enumerate(info.get("logs", []) or [], start=1):
+            n = len(log.get("time", [])) if isinstance(log, dict) else 0
+            for i in range(n):
+                ctx_names = _cbo_warm_log_get(log, "context_feature_names", i, fallback_context_names)
+                if not isinstance(ctx_names, (list, tuple)):
+                    ctx_names = fallback_context_names
+                control_theta = _cbo_warm_log_get(log, "theta_control_deployed", i, None)
+                alpha_theta = _cbo_warm_log_get(log, "alpha_direct_control_vector_6d", i, None)
+                deployed_theta = alpha_theta if isinstance(alpha_theta, (list, tuple)) else control_theta
+                eval_cost = _cbo_warm_log_get(log, "eval_cost", i, None)
+                if eval_cost is None:
+                    reward = _cbo_warm_log_get(log, "reward", i, None)
+                    eval_cost = -_cbo_ws_float(reward, np.nan) if reward is not None else np.nan
+                bo_cost = _cbo_warm_log_get(log, "bo_training_cost", i, eval_cost)
+                rows.append({
+                    "iteration": int(i + 1),
+                    "repeat_idx": int(repeat_idx),
+                    "method": str(group_key),
+                    "selected_key": str(group_key),
+                    "control_dim": int(control_dim),
+                    "context_dim": int(context_dim),
+                    "scheduler_tradeoff_mode": str(_cbo_warm_log_get(log, "scheduler_tradeoff_mode", i, getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy"))),
+                    "scheduler_score_norm_mode": str(_cbo_warm_log_get(log, "scheduler_score_norm_mode", i, getattr(CFG, "SCHEDULER_SCORE_NORM_MODE", "legacy"))),
+                    "scheduler_le_scale": _cbo_ws_float(_cbo_warm_log_get(log, "scheduler_le_scale", i, getattr(CFG, "SCHEDULER_LE_SCALE", 1.0)), float(getattr(CFG, "SCHEDULER_LE_SCALE", 1.0))),
+                    "lambda_value": lambda_value,
+                    "lambda_schedule": _cbo_warm_json_dump(lambda_schedule),
+                    "task_probs": _cbo_warm_json_dump(task_probs),
+                    "context_vector": _cbo_warm_json_dump(_cbo_warm_log_get(log, "context_vector", i, None)),
+                    "context_feature_names": _cbo_warm_json_dump(list(ctx_names or [])),
+                    "control_theta": _cbo_warm_json_dump(control_theta),
+                    "deployed_theta": _cbo_warm_json_dump(deployed_theta),
+                    "Alpha_Direct_Control_Vector_6D": _cbo_warm_json_dump(alpha_theta),
+                    "BO_Training_Cost": _cbo_ws_float(bo_cost, np.nan),
+                    "Eval_Cost": _cbo_ws_float(eval_cost, np.nan),
+                    "Avg_Delay": _cbo_ws_float(_cbo_warm_log_get(log, "avg_delay", i, np.nan), np.nan),
+                    "Avg_Energy": _cbo_ws_float(_cbo_warm_log_get(log, "avg_energy", i, np.nan), np.nan),
+                    "unfinished_end": _cbo_ws_float(_cbo_warm_log_get(log, "unfinished_end", i, np.nan), np.nan),
+                    "unfinished_rate": _cbo_ws_float(_cbo_warm_log_get(log, "unfinished_rate", i, np.nan), np.nan),
+                    "source_scene_label": source_label,
+                    "result_file_path": result_path,
+                })
+    path = os.path.join(output_dir, "bo_warm_history.csv")
+    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"[CBO-WARM-EXPORT] rows={len(rows)} path={path}", flush=True)
+    return path
+
+
 def run_scenario_group(seed, group_key, group_cfg):
     group_cfg["group_key"] = group_key
     fac = ConnectedFactory(fid=0, name=group_cfg["label"], seed=seed, node_config=CFG.NODES_CFG, scheduler_type=group_cfg.get("scheduler_type", "Boltzmann"), norm_mode=group_cfg.get("norm_mode", "rolling"))
@@ -4043,6 +5086,21 @@ def run_scenario_group(seed, group_key, group_cfg):
     method_use_score_risk = group_cfg.get("scheduler_use_score_risk", None)
     if method_use_score_risk is not None:
         CFG.USE_SCORE_RISK = bool(method_use_score_risk)
+    warm_start_status = {
+        "cbo_warm_start_enabled": False,
+        "cbo_warm_start_mode": str(getattr(CFG, "CBO_WARM_START_MODE", "none") or "none"),
+        "cbo_warm_start_loaded_rows": 0,
+        "cbo_warm_start_history_path": str(getattr(CFG, "CBO_WARM_START_HISTORY", "") or ""),
+    }
+    if fac.agent is not None:
+        try:
+            ws_state, _, _ = fac.scenario_monitor.get_state(fac.current_time)
+            ws_base_ctx = fac.scenario_monitor.get_context_vector(fac.current_time)
+            ws_ctx = build_context_for_group(fac, group_cfg, base_context=ws_base_ctx)
+            ws_ctx = ws_ctx if getattr(fac.agent, "use_context", False) else None
+            warm_start_status = _cbo_inject_warm_start(fac.agent, group_key, group_cfg, target_context=ws_ctx)
+        except Exception as exc:
+            print(f"[WARN] CBO warm-start injection failed for {group_key}: {type(exc).__name__}: {exc}", flush=True)
     # v6.2 runtime logging: per-method and per-iteration elapsed time.
     runtime_group_t0 = time.perf_counter()
     runtime_group_wall_t0 = time.time()
@@ -4129,6 +5187,7 @@ def run_scenario_group(seed, group_key, group_cfg):
         base_ctx = fac.scenario_monitor.get_context_vector(fac.current_time)
         ctx = build_context_for_group(fac, group_cfg, base_context=base_ctx)
         safe_info = {"deploy_policy": "fixed", "deploy_source": "fixed_theta", "explore_used": 0, "posterior_mu": None, "posterior_sigma": None, "candidate_count_safe": None}
+        safe_info.update(warm_start_status)
 
         if fac.agent is None:
             theta_control = list(group_cfg["fixed_theta"])
@@ -4138,6 +5197,8 @@ def run_scenario_group(seed, group_key, group_cfg):
             ask_state = state if getattr(fac.agent, "use_state_partition", False) else None
             ask_ctx = ctx if getattr(fac.agent, "use_context", False) else None
             theta_control, safe_info = _safebo_select_theta(fac.agent, state=ask_state, context=ask_ctx, group_cfg=group_cfg)
+            safe_info.update(warm_start_status)
+            safe_info.setdefault("cbo_warm_start_used_rows", safe_info.get("selected_warm_rows_count", 0))
             if bool(group_cfg.get("cbo_dump_candidates", bool(getattr(CFG, "CBO_DUMP_CANDIDATES", False)))):
                 every = max(1, int(group_cfg.get("cbo_dump_candidates_every", getattr(CFG, "CBO_DUMP_CANDIDATES_EVERY", 20))))
                 if ((i + 1) % every == 0) or ((i + 1) == int(CFG.BO_ITERATIONS)):
@@ -4319,6 +5380,35 @@ def run_scenario_group(seed, group_key, group_cfg):
             "predicted_cost", "actual_cost", "prediction_error", "surprise", "cost_gap_pct",
             "residual_trigger", "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
             "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
+            "cbo_warm_start_enabled", "cbo_warm_start_mode", "cbo_warm_start_loaded_rows",
+            "cbo_warm_start_used_rows", "selected_warm_rows_count", "selected_local_rows_count",
+            "cbo_warm_start_history_path",
+            "cbo_history_denoise_mode", "cbo_history_denoise_k", "cbo_history_denoise_radius",
+            "cbo_history_denoise_min_neighbors", "cbo_history_denoise_context_weight",
+            "cbo_history_denoise_theta_weight", "cbo_history_denoise_stat",
+            "cbo_history_denoise_apply_to", "cbo_history_denoise_raw_rows",
+            "cbo_history_denoise_smoothed_rows", "cbo_history_denoise_unsmoothed_rows",
+            "cbo_history_denoise_smoothed_ratio", "cbo_history_denoise_neighbor_count_mean",
+            "cbo_history_denoise_neighbor_count_max", "cbo_history_denoise_abs_delta_mean",
+            "cbo_history_denoise_abs_delta_max", "cbo_history_denoise_y_raw_mean",
+            "cbo_history_denoise_y_used_mean",
+            "cbo_history_outlier_filter_enabled", "cbo_history_outlier_strict_enabled",
+            "cbo_history_outlier_raw_rows",
+            "cbo_history_outlier_filtered_rows", "cbo_history_outlier_used_rows",
+            "cbo_history_outlier_filter_ratio", "cbo_history_outlier_neighbor_count_mean",
+            "cbo_history_outlier_neighbor_count_max", "cbo_history_outlier_theta_radius",
+            "cbo_history_outlier_context_radius", "cbo_history_outlier_min_peers",
+            "cbo_history_outlier_peer_count_mean", "cbo_history_outlier_peer_count_max",
+            "cbo_history_outlier_protect_pressure", "cbo_history_outlier_pressure_quantile",
+            "cbo_history_outlier_pressure_fields_available", "cbo_history_outlier_candidate_rows",
+            "cbo_history_outlier_protected_rows", "cbo_history_outlier_filtered_rows_before_protection",
+            "cbo_history_outlier_filtered_rows_after_protection", "cbo_history_outlier_protected_ratio",
+            "cbo_history_outlier_pressure_delay_threshold", "cbo_history_outlier_pressure_backlog_threshold",
+            "cbo_history_outlier_pressure_unfinished_threshold", "cbo_history_outlier_pressure_violation_threshold",
+            "cbo_history_outlier_residual_mean",
+            "cbo_history_outlier_residual_max", "cbo_history_outlier_threshold",
+            "cbo_history_outlier_abs_threshold", "cbo_history_outlier_max_filter_ratio",
+            "cbo_history_outlier_scale",
         ]:
             safe_info.setdefault(diag_key, None)
         for k, v in safe_info.items():
