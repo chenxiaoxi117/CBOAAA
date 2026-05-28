@@ -876,6 +876,346 @@ def _cbo_recent_costs(agent, window=None):
     return [v for v in vals if np.isfinite(v)]
 
 
+
+def _cbo_prediction_guard_mode():
+    """Prediction guard mode: off / diagnostic / active / deploy / conservative.
+
+    diagnostic only logs whether a guard would trigger. active/deploy/conservative
+    may replace the BO candidate with the target-local incumbent after a warmup
+    period when recent prediction errors show systematic cost underestimation.
+    """
+    try:
+        env = os.environ.get("CBO_PREDICTION_GUARD", None)
+        if env is not None and str(env).strip() != "":
+            return str(env).strip().lower()
+    except Exception:
+        pass
+    try:
+        return str(getattr(CFG, "CBO_PREDICTION_GUARD", "off") or "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _cbo_prediction_guard_param(name, default, cast=float):
+    try:
+        env_name = "CBO_PREDICTION_GUARD_" + str(name).upper()
+        env = os.environ.get(env_name, None)
+        if env is not None and str(env).strip() != "":
+            return cast(env)
+    except Exception:
+        pass
+    try:
+        return cast(getattr(CFG, "CBO_PREDICTION_GUARD_" + str(name).upper(), default))
+    except Exception:
+        return default
+
+
+def _cbo_prediction_guard_stats(agent, window=None, min_history=None):
+    """Summarize recent selected-candidate prediction errors.
+
+    prediction_error = actual_cost - predicted_cost, so positive values mean the
+    BO surrogate underestimated the actual cost.
+    """
+    mode = _cbo_prediction_guard_mode()
+    window = int(window if window is not None else _cbo_prediction_guard_param("window", 50, int))
+    min_history = int(min_history if min_history is not None else _cbo_prediction_guard_param("min_history", 20, int))
+    bias_thr = float(_cbo_prediction_guard_param("bias_threshold", 300.0, float))
+    under_thr = float(_cbo_prediction_guard_param("underestimate_rate", 0.65, float))
+
+    out = {
+        "prediction_guard_mode": mode,
+        "prediction_guard_enabled": int(mode not in {"", "off", "none", "false", "0"}),
+        "prediction_guard_history_count": 0,
+        "prediction_guard_recent_bias": np.nan,
+        "prediction_guard_recent_mae": np.nan,
+        "prediction_guard_underestimate_rate": np.nan,
+        "prediction_guard_surprise_abs_mean": np.nan,
+        "prediction_guard_should_trigger": 0,
+        "prediction_guard_reason": "not_ready",
+        "prediction_guard_window": int(window),
+        "prediction_guard_min_history": int(min_history),
+        "prediction_guard_bias_threshold": float(bias_thr),
+        "prediction_guard_underestimate_threshold": float(under_thr),
+        "prediction_guard_start_iter": int(_cbo_prediction_guard_param("start_iter", 200, int)),
+        "prediction_guard_bias_weight": float(_cbo_prediction_guard_param("bias_weight", 1.0, float)),
+        "prediction_guard_mae_weight": float(_cbo_prediction_guard_param("mae_weight", 0.5, float)),
+        "prediction_guard_active_triggered": 0,
+        "prediction_guard_active_reason": "not_evaluated",
+        "prediction_guard_risk_margin": np.nan,
+        "prediction_guard_predicted_candidate_cost": np.nan,
+        "prediction_guard_incumbent_cost": np.nan,
+        "prediction_guard_predicted_improvement": np.nan,
+        "prediction_guard_fallback_source": None,
+        "prediction_error_valid": 1,
+        "prediction_error_skipped_reason": None,
+    }
+    try:
+        hist = list(getattr(agent, "cbo_surprise_history", []) or [])
+    except Exception:
+        hist = []
+    if window > 0:
+        hist = hist[-window:]
+
+    errs = []
+    surprises = []
+    for r in hist:
+        try:
+            e = float(r.get("prediction_error", np.nan))
+            if np.isfinite(e):
+                errs.append(e)
+        except Exception:
+            pass
+        try:
+            z = float(r.get("surprise", np.nan))
+            if np.isfinite(z):
+                surprises.append(abs(z))
+        except Exception:
+            pass
+
+    out["prediction_guard_history_count"] = int(len(errs))
+    if len(errs) < min_history:
+        out["prediction_guard_reason"] = f"not_enough_history {len(errs)}/{min_history}"
+        return out
+
+    arr = np.asarray(errs, dtype=float)
+    bias = float(np.mean(arr))
+    mae = float(np.mean(np.abs(arr)))
+    under = float(np.mean(arr > 0.0))
+    should = bool(mode not in {"", "off", "none", "false", "0"} and bias > bias_thr and under >= under_thr)
+    out.update({
+        "prediction_guard_recent_bias": bias,
+        "prediction_guard_recent_mae": mae,
+        "prediction_guard_underestimate_rate": under,
+        "prediction_guard_surprise_abs_mean": float(np.mean(surprises)) if surprises else np.nan,
+        "prediction_guard_should_trigger": int(should),
+        "prediction_guard_reason": (
+            f"bias={bias:.3f},mae={mae:.3f},under={under:.3f},"
+            f"thr_bias={bias_thr:.3f},thr_under={under_thr:.3f},mode={mode}"
+        ),
+    })
+    return out
+
+
+def _cbo_prediction_guard_active_diag_from_debug(debug):
+    """Preserve active guard deployment diagnostics across post-tell updates."""
+    debug = dict(debug or {})
+    keys = [
+        "prediction_guard_active_triggered",
+        "prediction_guard_active_reason",
+        "prediction_guard_risk_margin",
+        "prediction_guard_predicted_candidate_cost",
+        "prediction_guard_incumbent_cost",
+        "prediction_guard_predicted_improvement",
+        "prediction_guard_fallback_source",
+        "prediction_error_skipped_reason",
+        "prediction_error_valid",
+    ]
+    out = {k: debug.get(k) for k in keys if k in debug}
+    deploy_source = str(debug.get("deploy_source", debug.get("used_theta_source", "")) or "").strip().lower()
+    if deploy_source == "prediction_guard_prev_best":
+        out.setdefault("prediction_guard_active_triggered", 1)
+        out.setdefault("prediction_guard_fallback_source", "prev_best")
+        out.setdefault("prediction_error_valid", 0)
+        out.setdefault("prediction_error_skipped_reason", "prediction_guard_deployed_incumbent")
+        if not out.get("prediction_guard_active_reason"):
+            out["prediction_guard_active_reason"] = "deploy_source=prediction_guard_prev_best"
+    return out
+
+
+def _cbo_prediction_error_should_skip(debug):
+    """Return True when candidate posterior error is invalid for the deployed theta."""
+    debug = dict(debug or {})
+    deploy_source = str(debug.get("deploy_source", debug.get("used_theta_source", "")) or "").strip().lower()
+    try:
+        active = int(float(debug.get("prediction_guard_active_triggered", 0) or 0)) != 0
+    except Exception:
+        active = False
+    return bool(active or deploy_source == "prediction_guard_prev_best")
+
+
+def _cbo_apply_prediction_guard_active(agent, theta, info, robust_info=None):
+    """Optionally replace proposed theta with target-local prev_best incumbent.
+
+    This is a deployment-layer guard. It does not change BO training data or
+    candidate generation. It only activates for active/deploy/conservative modes.
+    """
+    mode = _cbo_prediction_guard_mode()
+    active_modes = {"active", "deploy", "conservative"}
+    stats = _cbo_prediction_guard_stats(agent)
+    diag = dict(stats)
+    diag.update({
+        "prediction_guard_active_triggered": 0,
+        "prediction_guard_active_reason": "inactive_mode" if mode not in active_modes else "not_evaluated",
+        "prediction_guard_risk_margin": np.nan,
+        "prediction_guard_predicted_candidate_cost": np.nan,
+        "prediction_guard_incumbent_cost": np.nan,
+        "prediction_guard_predicted_improvement": np.nan,
+        "prediction_guard_fallback_source": None,
+        "prediction_error_valid": 1,
+        "prediction_error_skipped_reason": None,
+    })
+    if agent is None or mode not in active_modes:
+        return theta, info, diag
+
+    try:
+        step = int(getattr(agent, "step_count", 0))
+    except Exception:
+        step = 0
+    start_iter = int(_cbo_prediction_guard_param("start_iter", 200, int))
+    diag["prediction_guard_start_iter"] = int(start_iter)
+    if step < start_iter:
+        diag["prediction_guard_active_reason"] = f"before_start_iter step={step}<start={start_iter}"
+        return theta, info, diag
+
+    if int(stats.get("prediction_guard_should_trigger", 0) or 0) == 0:
+        diag["prediction_guard_active_reason"] = "diagnostic_not_triggered"
+        return theta, info, diag
+
+    if str((info or {}).get("deploy_source", "")).strip().lower() == "robust_incumbent":
+        diag["prediction_guard_active_reason"] = "already_robust_incumbent"
+        return theta, info, diag
+
+    incumbent_theta = getattr(agent, "prev_best", None)
+    incumbent_value = getattr(agent, "prev_best_value", None)
+    if incumbent_theta is None or incumbent_value is None:
+        diag["prediction_guard_active_reason"] = "no_prev_best_incumbent"
+        return theta, info, diag
+    try:
+        incumbent_cost = -float(incumbent_value)
+    except Exception:
+        diag["prediction_guard_active_reason"] = "invalid_incumbent_cost"
+        return theta, info, diag
+
+    mu = None
+    for k in ["selected_candidate_mu", "posterior_mu", "mu"]:
+        try:
+            if info is not None and info.get(k, None) is not None:
+                mu = float(info.get(k))
+                break
+        except Exception:
+            pass
+    if mu is None or not np.isfinite(mu):
+        diag["prediction_guard_active_reason"] = "no_candidate_mu"
+        return theta, info, diag
+
+    predicted_candidate_cost = -float(mu)
+    predicted_improvement = float(incumbent_cost) - float(predicted_candidate_cost)
+    bias = float(stats.get("prediction_guard_recent_bias", np.nan))
+    mae = float(stats.get("prediction_guard_recent_mae", np.nan))
+    bias_weight = float(_cbo_prediction_guard_param("bias_weight", 1.0, float))
+    mae_weight = float(_cbo_prediction_guard_param("mae_weight", 0.5, float))
+    risk_margin = max(0.0, bias if np.isfinite(bias) else 0.0) * bias_weight + max(0.0, mae if np.isfinite(mae) else 0.0) * mae_weight
+
+    diag.update({
+        "prediction_guard_bias_weight": float(bias_weight),
+        "prediction_guard_mae_weight": float(mae_weight),
+        "prediction_guard_risk_margin": float(risk_margin),
+        "prediction_guard_predicted_candidate_cost": float(predicted_candidate_cost),
+        "prediction_guard_incumbent_cost": float(incumbent_cost),
+        "prediction_guard_predicted_improvement": float(predicted_improvement),
+    })
+
+    if predicted_improvement < risk_margin:
+        theta = list(incumbent_theta)
+        info = dict(info or {})
+        info["deploy_source"] = "prediction_guard_prev_best"
+        info["used_theta_source"] = "prediction_guard_prev_best"
+        info["explore_used"] = 0
+        info["prediction_guard_active_triggered"] = 1
+        info["prediction_guard_active_reason"] = (
+            f"step={step};improve={predicted_improvement:.3f}<risk_margin={risk_margin:.3f};"
+            f"bias={bias:.3f};mae={mae:.3f}"
+        )
+        info["prediction_guard_fallback_source"] = "prev_best"
+        info["prediction_error_valid"] = 0
+        info["prediction_error_skipped_reason"] = "prediction_guard_deployed_incumbent"
+        diag.update({
+            "prediction_guard_active_triggered": 1,
+            "prediction_guard_active_reason": info["prediction_guard_active_reason"],
+            "prediction_guard_fallback_source": "prev_best",
+            "prediction_error_valid": 0,
+            "prediction_error_skipped_reason": "prediction_guard_deployed_incumbent",
+        })
+        try:
+            debug = dict(getattr(agent, "last_debug_info", {}) or {})
+            debug.update(diag)
+            debug["deploy_source"] = "prediction_guard_prev_best"
+            debug["used_theta_source"] = "prediction_guard_prev_best"
+            debug["prediction_error_valid"] = 0
+            debug["prediction_error_skipped_reason"] = "prediction_guard_deployed_incumbent"
+            agent.last_debug_info = debug
+        except Exception:
+            pass
+        return theta, info, diag
+
+    diag["prediction_guard_active_reason"] = (
+        f"pass improve={predicted_improvement:.3f}>=risk_margin={risk_margin:.3f}"
+    )
+    return theta, info, diag
+
+
+def _cbo_update_prediction_error_diagnostics(agent, actual_cost):
+    """Record selected-candidate prediction error for normal CBO modes."""
+    debug = dict(getattr(agent, "last_debug_info", {}) or {})
+    if _cbo_prediction_error_should_skip(debug):
+        active_diag = _cbo_prediction_guard_active_diag_from_debug(debug)
+        stats = _cbo_prediction_guard_stats(agent)
+        debug.update(stats)
+        debug.update(active_diag)
+        debug.update({
+            "predicted_cost": np.nan,
+            "actual_cost": float(actual_cost),
+            "prediction_error": np.nan,
+            "surprise": np.nan,
+            "prediction_error_valid": 0,
+            "prediction_error_skipped_reason": "prediction_guard_deployed_incumbent",
+        })
+        agent.last_debug_info = debug
+        return debug
+
+    sigma_floor = max(1e-12, float(getattr(agent, "cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 1e-6))))
+    mu = debug.get("selected_candidate_mu", debug.get("posterior_mu"))
+    sigma = debug.get("selected_candidate_sigma", debug.get("posterior_sigma"))
+    predicted_cost = np.nan
+    surprise = np.nan
+    raw_error = np.nan
+    try:
+        if mu is not None and np.isfinite(float(mu)):
+            predicted_cost = -float(mu)
+            raw_error = float(actual_cost) - predicted_cost
+            sig = sigma_floor if sigma is None or not np.isfinite(float(sigma)) else max(float(sigma), sigma_floor)
+            surprise = raw_error / sig
+    except Exception:
+        pass
+
+    hist = list(getattr(agent, "cbo_surprise_history", []) or [])
+    hist.append({
+        "actual_cost": float(actual_cost),
+        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
+        "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
+        "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
+        "radius": float(getattr(agent, "trust_radius", np.nan)),
+    })
+    max_hist = max(
+        20,
+        int(getattr(agent, "cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10))) * 5,
+        int(_cbo_prediction_guard_param("window", 50, int)) * 5,
+    )
+    agent.cbo_surprise_history = hist[-max_hist:]
+
+    debug.update({
+        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
+        "actual_cost": float(actual_cost),
+        "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
+        "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
+        "prediction_error_valid": int(np.isfinite(raw_error)),
+        "prediction_error_skipped_reason": None,
+    })
+    debug.update(_cbo_prediction_guard_stats(agent))
+    agent.last_debug_info = debug
+    return debug
+
+
 def _cbo_update_residual_condition_state(agent, actual_cost):
     """Update residual/condition diagnostics and possibly reset TR radius.
 
@@ -884,6 +1224,21 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
     a temporary exploration mode for the next few selections.
     """
     debug = dict(getattr(agent, "last_debug_info", {}) or {})
+    if _cbo_prediction_error_should_skip(debug):
+        active_diag = _cbo_prediction_guard_active_diag_from_debug(debug)
+        stats = _cbo_prediction_guard_stats(agent)
+        debug.update(stats)
+        debug.update(active_diag)
+        debug.update({
+            "predicted_cost": np.nan,
+            "actual_cost": float(actual_cost),
+            "prediction_error": np.nan,
+            "surprise": np.nan,
+            "prediction_error_valid": 0,
+            "prediction_error_skipped_reason": "prediction_guard_deployed_incumbent",
+        })
+        agent.last_debug_info = debug
+        return debug
     tr_mode = str(getattr(agent, "cbo_tr_mode", _cfg_cbo_str("CBO_TR_MODE", "off")) or "off").lower()
     select_mode = str(getattr(agent, "cbo_select_mode", _cfg_cbo_str("CBO_SELECT_MODE", "greedy")) or "greedy").lower()
     sigma_floor = max(1e-12, float(getattr(agent, "cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 1e-6))))
@@ -909,7 +1264,11 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
         "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
         "radius": float(getattr(agent, "trust_radius", np.nan)),
     })
-    max_hist = max(20, int(getattr(agent, "cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10))) * 5)
+    max_hist = max(
+        20,
+        int(getattr(agent, "cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10))) * 5,
+        int(_cbo_prediction_guard_param("window", 50, int)) * 5,
+    )
     agent.cbo_surprise_history = hist[-max_hist:]
 
     # radius-min stuck counter
@@ -963,6 +1322,8 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
         "actual_cost": float(actual_cost),
         "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
         "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
+        "prediction_error_valid": int(np.isfinite(raw_error)),
+        "prediction_error_skipped_reason": None,
         "cost_gap_pct": float(cost_gap_pct),
         "residual_trigger": int(residual_trigger),
         "condition_trigger": int(condition_trigger),
@@ -1195,7 +1556,20 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             robust_info["robust_incumbent_reason"] = f"not_deployed eval_count={eval_count} sim={sim:.3f} bo_not_clearly_better={bo_not_clearly_better}"
     elif robust_mode == "recommend_only" and robust_info.get("robust_incumbent_available"):
         robust_info["robust_incumbent_reason"] = "recommend_only"
+
+    pred_guard_active_info = {}
+    if agent is not None:
+        try:
+            theta, info, pred_guard_active_info = _cbo_apply_prediction_guard_active(
+                agent, theta, info, robust_info=robust_info
+            )
+        except Exception as exc:
+            pred_guard_active_info = {
+                "prediction_guard_active_triggered": 0,
+                "prediction_guard_active_reason": "active_guard_error:" + type(exc).__name__,
+            }
     info.update(robust_info)
+    info.update(pred_guard_active_info)
     if agent is not None:
         debug = dict(getattr(agent, "last_debug_info", {}) or {})
         debug.update(dict(getattr(agent, "last_history_debug", {}) or {}))
@@ -1238,7 +1612,17 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "anchor_fallback_used", "anchor_fallback_reason", "anchor_theta_distance_to_prev",
             "anchor_theta_distance_to_robust_elite", "anchor_theta_distance_to_context_best",
             "anchor_theta_distance_to_recent_best", "runtime_anchor_override_reason",
-            "predicted_cost", "actual_cost", "prediction_error", "surprise", "cost_gap_pct",
+            "predicted_cost", "actual_cost", "prediction_error", "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
+            "prediction_guard_mode", "prediction_guard_enabled", "prediction_guard_history_count",
+            "prediction_guard_recent_bias", "prediction_guard_recent_mae", "prediction_guard_underestimate_rate",
+            "prediction_guard_surprise_abs_mean", "prediction_guard_should_trigger", "prediction_guard_reason",
+            "prediction_guard_window", "prediction_guard_min_history", "prediction_guard_bias_threshold",
+            "prediction_guard_underestimate_threshold", "prediction_guard_start_iter",
+            "prediction_guard_bias_weight", "prediction_guard_mae_weight",
+            "prediction_guard_active_triggered", "prediction_guard_active_reason",
+            "prediction_guard_risk_margin", "prediction_guard_predicted_candidate_cost",
+            "prediction_guard_incumbent_cost", "prediction_guard_predicted_improvement",
+            "prediction_guard_fallback_source",
             "residual_trigger", "condition_trigger", "radius_min_stuck_count",
             "force_explore_countdown", "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
             "cbo_history_denoise_mode", "cbo_history_denoise_k", "cbo_history_denoise_radius",
@@ -1830,11 +2214,10 @@ LITE_CONTEXT_FEATURE_NAMES = [
     "prev_unfinished_rate",         # 15
     "recent_unfinished_rate_mean",  # 16
     "unfinished_rate_trend",        # 17
-    "prev_backlog_growth_norm",     # 18: 上一窗口压力变化，>0 表示积压恶化，<0 表示缓解
 ]
 LITE_CONTEXT_BOUNDS = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
-    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
 ]
 
 # v6.1: CBO-lite context 消融配置。
@@ -1850,20 +2233,6 @@ LITE_CONTEXT_MODE_SPECS = {
     "util": {"label": "util_only", "indices": [2, 3]},
     "pressure_only": {"label": "pressure_only", "indices": [1, 2, 3, 4]},
     "pressure": {"label": "pressure_only", "indices": [1, 2, 3, 4]},
-
-    # 新增：低维 pressure-transition context。
-    # 5D 只在原 pressure_only 上增加上一窗口 unfinished/backlog 水平；
-    # 6D 再增加上一窗口压力变化趋势，区分“同样起始 backlog 但正在恶化/恢复”的状态。
-    "pressure_prev_unfinished_5d": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
-    "pressure_prev_unfinished": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
-    "pressure_prev_unfinished_end": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
-    "pressure_5d": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
-
-    "pressure_transition_6d": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
-    "pressure_transition": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
-    "pressure_prev_unfinished_growth": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
-    "pressure_6d": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
-
     "no_cloud": {"label": "no_cloud", "indices": [0, 1, 2, 3, 4]},
     "no_arrival": {"label": "no_arrival", "indices": [1, 2, 3, 4, 5]},
 
@@ -1917,16 +2286,6 @@ PRESSURE_UNFINISHED_CONTEXT_NAMES = [
 PRESSURE_PREV_UNFINISHED_CONTEXT_NAMES = [
     LITE_CONTEXT_FEATURE_NAMES[i]
     for i in [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]
-]
-
-PRESSURE_PREV_UNFINISHED_5D_CONTEXT_NAMES = [
-    LITE_CONTEXT_FEATURE_NAMES[i]
-    for i in [1, 2, 3, 4, 15]
-]
-
-PRESSURE_TRANSITION_6D_CONTEXT_NAMES = [
-    LITE_CONTEXT_FEATURE_NAMES[i]
-    for i in [1, 2, 3, 4, 15, 18]
 ]
 
 
@@ -2717,22 +3076,6 @@ def _unfinished_context_features(fac):
     return prev_rate, recent_mean, float(np.clip(trend, -1.0, 1.0)), status
 
 
-def _prev_backlog_growth_context_feature(fac):
-    """上一窗口压力变化特征。
-
-    使用历史 unfinished/backlog rate 的一阶差分：
-    - > 0：上一窗口结束时积压比例比再上一窗口更高，压力正在恶化；
-    - < 0：上一窗口结束时积压比例下降，压力正在缓解。
-
-    只读取已完成窗口的 perf_log，不使用当前窗口未来结果。
-    """
-    rates = _unfinished_rate_history(fac)
-    if len(rates) < 2:
-        return 0.0
-    growth = float(rates[-1]) - float(rates[-2])
-    return float(np.clip(growth, -1.0, 1.0))
-
-
 def build_lite_context_vector(fac, base_context=None):
     """构造 CBO-lite 的窗口开始状态。
 
@@ -2791,7 +3134,6 @@ def build_lite_context_vector(fac, base_context=None):
         prev_ai_ratio = cfg_ai
 
     prev_unfinished_rate, recent_unfinished_rate_mean, unfinished_rate_trend, unfinished_status = _unfinished_context_features(fac)
-    prev_backlog_growth_norm = _prev_backlog_growth_context_feature(fac)
     try:
         fac._last_unfinished_context_status = unfinished_status
     except Exception:
@@ -2816,7 +3158,6 @@ def build_lite_context_vector(fac, base_context=None):
         prev_unfinished_rate,
         recent_unfinished_rate_mean,
         unfinished_rate_trend,
-        prev_backlog_growth_norm,
     ]
 
 
@@ -3879,8 +4220,13 @@ def _stability_tell(self, theta, cost, state=None, context=None):
         _cbo_update_tr_radius_after_tell(self, float(cost), prev_best_value=prev_best_value, radius_before=radius_before)
         if tr_mode in {"residual_adaptive", "condition_adaptive"}:
             _cbo_update_residual_condition_state(self, float(cost))
+        else:
+            _cbo_update_prediction_error_diagnostics(self, float(cost))
     elif tr_mode == "good_region":
         self.cbo_tr_update_reason = "good_region_fixed_radius"
+        _cbo_update_prediction_error_diagnostics(self, float(cost))
+    else:
+        _cbo_update_prediction_error_diagnostics(self, float(cost))
 
 
 FederatedBOAgent.tell = _stability_tell
@@ -5361,7 +5707,7 @@ def run_scenario_group(seed, group_key, group_cfg):
                 "tr_worse_pct", "tr_update_signal", "tr_update_patience_count",
                 "cbo_tr_update_reason", "cbo_tr_radius_before_update", "cbo_tr_radius_after_update",
                 "cbo_tr_success_count", "cbo_tr_failure_count", "predicted_cost", "actual_cost",
-                "prediction_error", "surprise", "cost_gap_pct", "residual_trigger",
+                "prediction_error", "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct", "residual_trigger",
                 "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
                 "runtime_anchor_override",
             ]:
@@ -5420,7 +5766,7 @@ def run_scenario_group(seed, group_key, group_cfg):
             "tr_update_mode", "tr_baseline_mean", "tr_current_mean", "tr_improve_pct",
             "tr_worse_pct", "tr_update_signal", "tr_update_patience_count",
             "cbo_tr_radius_before_update",
-            "predicted_cost", "actual_cost", "prediction_error", "surprise", "cost_gap_pct",
+            "predicted_cost", "actual_cost", "prediction_error", "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
             "residual_trigger", "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
             "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
             "cbo_warm_start_enabled", "cbo_warm_start_mode", "cbo_warm_start_loaded_rows",
