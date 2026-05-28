@@ -1830,10 +1830,11 @@ LITE_CONTEXT_FEATURE_NAMES = [
     "prev_unfinished_rate",         # 15
     "recent_unfinished_rate_mean",  # 16
     "unfinished_rate_trend",        # 17
+    "prev_backlog_growth_norm",     # 18: 上一窗口压力变化，>0 表示积压恶化，<0 表示缓解
 ]
 LITE_CONTEXT_BOUNDS = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
-    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
 ]
 
 # v6.1: CBO-lite context 消融配置。
@@ -1849,6 +1850,20 @@ LITE_CONTEXT_MODE_SPECS = {
     "util": {"label": "util_only", "indices": [2, 3]},
     "pressure_only": {"label": "pressure_only", "indices": [1, 2, 3, 4]},
     "pressure": {"label": "pressure_only", "indices": [1, 2, 3, 4]},
+
+    # 新增：低维 pressure-transition context。
+    # 5D 只在原 pressure_only 上增加上一窗口 unfinished/backlog 水平；
+    # 6D 再增加上一窗口压力变化趋势，区分“同样起始 backlog 但正在恶化/恢复”的状态。
+    "pressure_prev_unfinished_5d": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
+    "pressure_prev_unfinished": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
+    "pressure_prev_unfinished_end": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
+    "pressure_5d": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
+
+    "pressure_transition_6d": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
+    "pressure_transition": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
+    "pressure_prev_unfinished_growth": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
+    "pressure_6d": {"label": "pressure_transition_6d", "indices": [1, 2, 3, 4, 15, 18]},
+
     "no_cloud": {"label": "no_cloud", "indices": [0, 1, 2, 3, 4]},
     "no_arrival": {"label": "no_arrival", "indices": [1, 2, 3, 4, 5]},
 
@@ -1902,6 +1917,16 @@ PRESSURE_UNFINISHED_CONTEXT_NAMES = [
 PRESSURE_PREV_UNFINISHED_CONTEXT_NAMES = [
     LITE_CONTEXT_FEATURE_NAMES[i]
     for i in [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]
+]
+
+PRESSURE_PREV_UNFINISHED_5D_CONTEXT_NAMES = [
+    LITE_CONTEXT_FEATURE_NAMES[i]
+    for i in [1, 2, 3, 4, 15]
+]
+
+PRESSURE_TRANSITION_6D_CONTEXT_NAMES = [
+    LITE_CONTEXT_FEATURE_NAMES[i]
+    for i in [1, 2, 3, 4, 15, 18]
 ]
 
 
@@ -2692,6 +2717,22 @@ def _unfinished_context_features(fac):
     return prev_rate, recent_mean, float(np.clip(trend, -1.0, 1.0)), status
 
 
+def _prev_backlog_growth_context_feature(fac):
+    """上一窗口压力变化特征。
+
+    使用历史 unfinished/backlog rate 的一阶差分：
+    - > 0：上一窗口结束时积压比例比再上一窗口更高，压力正在恶化；
+    - < 0：上一窗口结束时积压比例下降，压力正在缓解。
+
+    只读取已完成窗口的 perf_log，不使用当前窗口未来结果。
+    """
+    rates = _unfinished_rate_history(fac)
+    if len(rates) < 2:
+        return 0.0
+    growth = float(rates[-1]) - float(rates[-2])
+    return float(np.clip(growth, -1.0, 1.0))
+
+
 def build_lite_context_vector(fac, base_context=None):
     """构造 CBO-lite 的窗口开始状态。
 
@@ -2750,6 +2791,7 @@ def build_lite_context_vector(fac, base_context=None):
         prev_ai_ratio = cfg_ai
 
     prev_unfinished_rate, recent_unfinished_rate_mean, unfinished_rate_trend, unfinished_status = _unfinished_context_features(fac)
+    prev_backlog_growth_norm = _prev_backlog_growth_context_feature(fac)
     try:
         fac._last_unfinished_context_status = unfinished_status
     except Exception:
@@ -2774,6 +2816,7 @@ def build_lite_context_vector(fac, base_context=None):
         prev_unfinished_rate,
         recent_unfinished_rate_mean,
         unfinished_rate_trend,
+        prev_backlog_growth_norm,
     ]
 
 

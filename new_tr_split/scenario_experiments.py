@@ -237,6 +237,15 @@ def build_scenario_method_groups():
         "reduced6_cbo_lite_load_only": cbo_lite_group("Load Context", "load_only"),
         "reduced6_cbo_lite_util_only": cbo_lite_group("Util Context", "util_only"),
         "reduced6_cbo_lite_pressure_only": cbo_lite_group("Pressure Context", "pressure_only"),
+        "reduced6_cbo_lite_pressure_prev_unfinished": cbo_lite_group(
+        "Pressure+PrevUnfinished Context",
+         "pressure_prev_unfinished_5d",
+        ),
+
+        "reduced6_cbo_lite_pressure_transition": cbo_lite_group(
+        "Pressure+Transition Context",
+        "pressure_transition_6d",
+        ),
         "reduced6_cbo_lite_no_cloud": cbo_lite_group("No Cloud Context", "no_cloud"),
         "reduced6_cbo_lite_no_arrival": cbo_lite_group("No Arrival Context", "no_arrival"),
         # v6.1 新增：任务结构/上一窗口任务数 context，用于验证 RT/Batch/AI 场景区分度。
