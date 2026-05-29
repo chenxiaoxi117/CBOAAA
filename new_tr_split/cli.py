@@ -48,7 +48,7 @@ if __name__ == "__main__":
             return False
         raise argparse.ArgumentTypeError("expected one of true/false, yes/no, on/off, 1/0")
 
-    parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "offline_noise"], default="all")
+    parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "dynamic_scenario", "offline_noise"], default="all")
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--local-delta", type=float, default=0.08)
     parser.add_argument("--dim", type=str, default="W_RT_Latency")
@@ -119,6 +119,10 @@ if __name__ == "__main__":
     parser.add_argument("--task-prob-schedule", type=str, default=None, help="分段任务比例，例如 0:4000:20,40,40;4000:9000:40,10,50")
     parser.add_argument("--lambda-schedule", type=str, default=None, help="分段泊松强度，例如 0:4000:1.0,4000:9000:2.2,9000:12000:1.2")
     parser.add_argument("--lambda-values", type=str, default=None, help="pressure_scan 用，逗号分隔，例如 1.0,1.4,1.8,2.2,2.6,3.0")
+    parser.add_argument("--dynamic-schedule", type=str, default=getattr(CFG, "DEFAULT_DYNAMIC_SCHEDULE", ""), help="dynamic_scenario 用，格式：lambda:RT,Batch,AI:length;... 例如 1.8:10,10,80:200;2.6:10,20,70:200")
+    parser.add_argument("--dynamic-history-mode", choices=["all_history", "recent_window", "context_topk"], default=getattr(CFG, "DEFAULT_DYNAMIC_HISTORY_MODE", "all_history"), help="dynamic_scenario 的历史使用模式；第一版主要记录该设置")
+    parser.add_argument("--dynamic-history-window", type=int, default=getattr(CFG, "DEFAULT_DYNAMIC_HISTORY_WINDOW", 200), help="dynamic_scenario recent_window 的窗口大小")
+    parser.add_argument("--dynamic-context-topk", type=int, default=getattr(CFG, "DEFAULT_DYNAMIC_CONTEXT_TOPK", 100), help="dynamic_scenario context_topk 的样本数")
     parser.add_argument("--bo-history-mode", choices=["all", "recent", "confidence", "recent_confidence"], default=getattr(CFG, "DEFAULT_BO_HISTORY_MODE", "recent"), help="BO GP训练历史使用方式；备份版默认 recent。all=全部；recent=最近N个；confidence=过滤低可信反馈；recent_confidence=最近+可信度过滤")
     parser.add_argument("--bo-recent-window", type=int, default=getattr(CFG, "DEFAULT_BO_RECENT_WINDOW", 80), help="recent/recent_confidence 模式保留最近多少个BO样本；备份版默认80")
     parser.add_argument("--bo-confidence-min", type=float, default=None, help="confidence/recent_confidence 模式下保留样本的最低反馈可信度")
@@ -476,6 +480,10 @@ if __name__ == "__main__":
         # 如果用户没手动覆盖 session_duration，则自动扩展到 schedule 末尾。
         if args.session_duration is None:
             CFG.SESSION_DURATION = max(float(x[1]) for x in CFG.LAMBDA_SCHEDULE)
+    CFG.DYNAMIC_SCHEDULE = str(args.dynamic_schedule or "")
+    CFG.DYNAMIC_HISTORY_MODE = str(args.dynamic_history_mode)
+    CFG.DYNAMIC_HISTORY_WINDOW = int(args.dynamic_history_window)
+    CFG.DYNAMIC_CONTEXT_TOPK = int(args.dynamic_context_topk)
     CFG.REPEAT_RUNS = max(1, args.repeat)
     if args.mode == "param":
         run_param_analysis(samples=args.samples, local_delta=args.local_delta)
@@ -509,6 +517,19 @@ if __name__ == "__main__":
             output_root=args.output_root,
             selected_keys=selected_keys,
             task_probs=parse_task_probs_arg(args.task_probs),
+        )
+    elif args.mode == "dynamic_scenario":
+        selected_keys = None
+        if args.selected_keys:
+            selected_keys = normalize_selected_method_keys([x.strip() for x in args.selected_keys.split(",") if x.strip()])
+        run_dynamic_scenario_experiments(
+            repeat_runs=max(1, args.repeat),
+            selected_keys=selected_keys,
+            output_dir=args.output_root,
+            dynamic_schedule=args.dynamic_schedule,
+            dynamic_history_mode=args.dynamic_history_mode,
+            dynamic_history_window=args.dynamic_history_window,
+            dynamic_context_topk=args.dynamic_context_topk,
         )
     elif args.mode == "offline_noise":
         selected_keys = None

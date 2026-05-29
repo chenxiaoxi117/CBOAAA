@@ -764,6 +764,24 @@ class ExperimentConfig:
     DEFAULT_CBO_HISTORY_OUTLIER_PRESSURE_QUANTILE = 0.75
     DEFAULT_CBO_HISTORY_OUTLIER_PROTECT_HIGH_COST_ONLY = True
     DEFAULT_CBO_HISTORY_OUTLIER_PRESSURE_FIELDS = "Avg_Delay,Backlog,unfinished_end,Violation"
+
+    # ===========================================================
+    # Dynamic multi-phase scenario experiment defaults
+    # -----------------------------------------------------------
+    # These defaults are inert unless --mode dynamic_scenario is used.
+    # A dynamic schedule is a single-factory sequence of workload phases.
+    # BO/CBO agents keep their local history across phase switches.
+    # ===========================================================
+    DEFAULT_DYNAMIC_SCHEDULE = ""
+    DEFAULT_DYNAMIC_HISTORY_MODE = "all_history"  # all_history / recent_window / context_topk (first version records only)
+    DEFAULT_DYNAMIC_HISTORY_WINDOW = 200
+    DEFAULT_DYNAMIC_CONTEXT_TOPK = 100
+    DYNAMIC_SCENARIO_ACTIVE = False
+    DYNAMIC_PHASE_PLAN = []
+    DYNAMIC_HISTORY_MODE = DEFAULT_DYNAMIC_HISTORY_MODE
+    DYNAMIC_HISTORY_WINDOW = DEFAULT_DYNAMIC_HISTORY_WINDOW
+    DYNAMIC_CONTEXT_TOPK = DEFAULT_DYNAMIC_CONTEXT_TOPK
+
     DEFAULT_SELECTED_KEYS_NO_RR = [
         "reduced6_fixed_mid",
         "reduced6_fixed_tuned",

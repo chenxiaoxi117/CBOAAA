@@ -1379,6 +1379,374 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
     except Exception as e:
         print(f"[WARN] failed to write refactor_run_config.json: {e}")
 
+
+
+# ===============================================================
+# Dynamic multi-phase scenario experiments
+# ---------------------------------------------------------------
+# This mode runs one factory through multiple workload phases in a
+# single continuous BO/CBO run.  Fixed policies keep the same weights;
+# BO/CBO agents keep their local history across phase switches.
+# ===============================================================
+
+def parse_dynamic_schedule_arg(spec):
+    """Parse --dynamic-schedule.
+
+    Format:
+        "lambda:RT,Batch,AI:length;lambda:RT,Batch,AI:length;..."
+
+    Example:
+        "1.8:10,10,80:200;2.6:10,20,70:200"
+
+    length is measured in BO/CBO outer iterations.  RT/Batch/AI may be
+    given as percentages or probabilities.
+    """
+    if spec is None or str(spec).strip() == "":
+        raise ValueError("--dynamic-schedule is required for --mode dynamic_scenario")
+    phases = []
+    iter_cursor = 1
+    time_cursor = 0.0
+    interval = float(getattr(CFG, "BO_INTERVAL", 1.0))
+    for idx, block in enumerate(str(spec).split(";"), start=1):
+        block = block.strip()
+        if not block:
+            continue
+        parts = block.split(":")
+        if len(parts) != 3:
+            raise ValueError("Each dynamic schedule block must be lambda:RT,Batch,AI:length")
+        lam = float(parts[0])
+        probs = parse_task_probs_arg(parts[1])
+        length = int(float(parts[2]))
+        if length <= 0:
+            raise ValueError("Dynamic phase length must be positive")
+        rt = float(probs.get("RT", 0.0))
+        batch = float(probs.get("Batch", 0.0))
+        ai = float(probs.get("AI", 0.0))
+        iter_start = int(iter_cursor)
+        iter_end = int(iter_cursor + length - 1)
+        time_start = float(time_cursor)
+        time_end = float(time_cursor + length * interval)
+        phase_name = f"P{idx}_lam{str(lam).replace('.', 'p')}_RT{int(round(rt*100))}_B{int(round(batch*100))}_AI{int(round(ai*100))}"
+        phases.append({
+            "phase_id": int(idx),
+            "phase_name": phase_name,
+            "lambda": float(lam),
+            "task_probs": dict(probs),
+            "rt_prob": rt,
+            "batch_prob": batch,
+            "ai_prob": ai,
+            "length": int(length),
+            "iter_start": iter_start,
+            "iter_end": iter_end,
+            "time_start": time_start,
+            "time_end": time_end,
+            "signature": f"lam{lam:.6g}_RT{rt:.4f}_B{batch:.4f}_AI{ai:.4f}",
+        })
+        iter_cursor += length
+        time_cursor = time_end
+    if not phases:
+        raise ValueError("No valid phases parsed from --dynamic-schedule")
+    return phases
+
+
+def _dynamic_phase_for_iter(plan, iteration):
+    iteration = int(iteration)
+    for phase in plan:
+        if int(phase["iter_start"]) <= iteration <= int(phase["iter_end"]):
+            return phase
+    return plan[-1] if plan else None
+
+
+def annotate_log_with_dynamic_phases(log, plan=None):
+    """Append dynamic phase metadata arrays to one performance log."""
+    if not isinstance(log, dict):
+        return log
+    plan = list(plan if plan is not None else getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or [])
+    if not plan:
+        return log
+    n = len(log.get("time", [])) or len(log.get("reward", [])) or int(getattr(CFG, "BO_ITERATIONS", 0))
+    phase_ids, phase_names, phase_iters = [], [], []
+    phase_lams, phase_rt, phase_batch, phase_ai = [], [], [], []
+    global_iters = []
+    signatures = []
+    for idx in range(1, n + 1):
+        ph = _dynamic_phase_for_iter(plan, idx)
+        global_iters.append(int(idx))
+        if ph is None:
+            phase_ids.append(None); phase_names.append(None); phase_iters.append(None)
+            phase_lams.append(None); phase_rt.append(None); phase_batch.append(None); phase_ai.append(None); signatures.append(None)
+        else:
+            phase_ids.append(int(ph["phase_id"]))
+            phase_names.append(str(ph["phase_name"]))
+            phase_iters.append(int(idx - int(ph["iter_start"]) + 1))
+            phase_lams.append(float(ph["lambda"]))
+            phase_rt.append(float(ph["rt_prob"]))
+            phase_batch.append(float(ph["batch_prob"]))
+            phase_ai.append(float(ph["ai_prob"]))
+            signatures.append(str(ph.get("signature", "")))
+    log["dynamic_mode"] = [True] * n
+    log["dynamic_history_mode"] = [str(getattr(CFG, "DYNAMIC_HISTORY_MODE", "all_history"))] * n
+    log["dynamic_global_iter"] = global_iters
+    log["dynamic_phase_id"] = phase_ids
+    log["dynamic_phase_name"] = phase_names
+    log["dynamic_phase_iter"] = phase_iters
+    log["dynamic_phase_lambda"] = phase_lams
+    log["dynamic_phase_rt_prob"] = phase_rt
+    log["dynamic_phase_batch_prob"] = phase_batch
+    log["dynamic_phase_ai_prob"] = phase_ai
+    log["dynamic_phase_signature"] = signatures
+    return log
+
+
+def _safe_series_mean(s):
+    try:
+        return float(pd.to_numeric(s, errors="coerce").mean())
+    except Exception:
+        return float("nan")
+
+
+def _first_recovery_iter(cost_values, threshold):
+    try:
+        cost = pd.to_numeric(pd.Series(cost_values), errors="coerce")
+        r50 = cost.rolling(50).mean()
+        for i, v in enumerate(r50, start=1):
+            if pd.notna(v) and float(v) <= float(threshold):
+                return int(i)
+    except Exception:
+        pass
+    return np.nan
+
+
+def save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir):
+    """Save dynamic_round_summary / phase / transition / repeated-phase CSVs."""
+    os.makedirs(output_dir, exist_ok=True)
+    round_frames = []
+    phase_rows = []
+    transition_rows = []
+    repeated_rows = []
+
+    for group_key, info in group_logs.items():
+        label = info.get("label", group_key)
+        for repeat_idx, raw_log in enumerate(info.get("logs", []), start=1):
+            log = annotate_log_with_dynamic_phases(raw_log, phase_plan)
+            try:
+                round_df = group_log_to_dataframe(log, group_key, label)
+            except Exception:
+                # Fallback minimal table, in case a future diagnostics change breaks flattening.
+                n = len(log.get("eval_cost", [])) or len(log.get("reward", []))
+                round_df = pd.DataFrame({
+                    "Group_Key_方法键": group_key,
+                    "Group_Label_方法名称": label,
+                    "Iteration_轮次": np.arange(1, n + 1),
+                    "Eval_Cost_最终评估Cost": log.get("eval_cost", [np.nan] * n),
+                    "Avg_Delay_平均时延": log.get("avg_delay", [np.nan] * n),
+                    "Avg_Energy_平均能耗": log.get("avg_energy", [np.nan] * n),
+                    "Backlog_积压任务数": log.get("backlog", [np.nan] * n),
+                })
+                for k in ["dynamic_global_iter", "dynamic_phase_id", "dynamic_phase_name", "dynamic_phase_iter", "dynamic_phase_lambda", "dynamic_phase_rt_prob", "dynamic_phase_batch_prob", "dynamic_phase_ai_prob", "dynamic_history_mode"]:
+                    round_df[k] = log.get(k, [None] * n)
+            round_df.insert(0, "Repeat_Index_重复序号", int(repeat_idx))
+            round_frames.append(round_df)
+
+            # Dynamic phase summary.
+            phase_id_col = "Phase_ID_阶段ID" if "Phase_ID_阶段ID" in round_df.columns else "dynamic_phase_id"
+            phase_name_col = "Phase_Name_阶段名称" if "Phase_Name_阶段名称" in round_df.columns else "dynamic_phase_name"
+            cost_col = "Eval_Cost_最终评估Cost"
+            delay_col = "Avg_Delay_平均时延" if "Avg_Delay_平均时延" in round_df.columns else None
+            energy_col = "Avg_Energy_平均能耗" if "Avg_Energy_平均能耗" in round_df.columns else None
+            backlog_col = "Backlog_积压任务数" if "Backlog_积压任务数" in round_df.columns else None
+            for ph in phase_plan:
+                seg = round_df[round_df[phase_id_col] == ph["phase_id"]].copy()
+                if seg.empty:
+                    continue
+                cost = pd.to_numeric(seg[cost_col], errors="coerce")
+                r50 = cost.rolling(50).mean()
+                phase_rows.append({
+                    "method": group_key,
+                    "method_label": label,
+                    "repeat_idx": int(repeat_idx),
+                    "phase_id": int(ph["phase_id"]),
+                    "phase_name": str(ph["phase_name"]),
+                    "phase_signature": str(ph.get("signature", "")),
+                    "lambda": float(ph["lambda"]),
+                    "RT": float(ph["rt_prob"]),
+                    "Batch": float(ph["batch_prob"]),
+                    "AI": float(ph["ai_prob"]),
+                    "phase_rows": int(len(seg)),
+                    "phase_mean": float(cost.mean()),
+                    "phase_first20": float(cost.head(20).mean()),
+                    "phase_first50": float(cost.head(50).mean()),
+                    "phase_last50": float(cost.tail(50).mean()),
+                    "phase_rolling50_min": float(r50.min()) if r50.notna().any() else np.nan,
+                    "phase_rolling50_min_iter": int(r50.idxmin() - seg.index.min() + 1) if r50.notna().any() else np.nan,
+                    "phase_rebound_pct": float(100.0 * (cost.tail(50).mean() - r50.min()) / abs(r50.min())) if r50.notna().any() and abs(float(r50.min())) > 1e-12 else np.nan,
+                    "phase_avg_delay": _safe_series_mean(seg[delay_col]) if delay_col else np.nan,
+                    "phase_avg_energy": _safe_series_mean(seg[energy_col]) if energy_col else np.nan,
+                    "phase_avg_backlog": _safe_series_mean(seg[backlog_col]) if backlog_col else np.nan,
+                })
+
+            # Transitions.
+            for ph in phase_plan[1:]:
+                prev = phase_plan[int(ph["phase_id"]) - 2]
+                seg = round_df[round_df[phase_id_col] == ph["phase_id"]].copy()
+                if seg.empty:
+                    continue
+                cost = pd.to_numeric(seg[cost_col], errors="coerce")
+                phase_last50 = float(cost.tail(50).mean())
+                threshold = 1.05 * phase_last50
+                transition_rows.append({
+                    "method": group_key,
+                    "method_label": label,
+                    "repeat_idx": int(repeat_idx),
+                    "from_phase_id": int(prev["phase_id"]),
+                    "from_phase_name": str(prev["phase_name"]),
+                    "to_phase_id": int(ph["phase_id"]),
+                    "to_phase_name": str(ph["phase_name"]),
+                    "to_phase_signature": str(ph.get("signature", "")),
+                    "first20_after_switch": float(cost.head(20).mean()),
+                    "first50_after_switch": float(cost.head(50).mean()),
+                    "to_phase_last50": phase_last50,
+                    "recovery_threshold_105pct_last50": float(threshold),
+                    "recovery_time_iter": _first_recovery_iter(cost, threshold),
+                    "switching_regret_first50_vs_last50": float(cost.head(50).mean() - phase_last50),
+                    "switching_regret_first50_pct": float(100.0 * (cost.head(50).mean() - phase_last50) / abs(phase_last50)) if abs(phase_last50) > 1e-12 else np.nan,
+                })
+
+            # Repeated phases by signature.
+            phase_df = pd.DataFrame([r for r in phase_rows if r["method"] == group_key and r["repeat_idx"] == repeat_idx])
+            if not phase_df.empty:
+                for sig, sg in phase_df.groupby("phase_signature"):
+                    sg = sg.sort_values("phase_id")
+                    if len(sg) < 2:
+                        continue
+                    base = sg.iloc[0]
+                    for _, rep in sg.iloc[1:].iterrows():
+                        repeated_rows.append({
+                            "method": group_key,
+                            "method_label": label,
+                            "repeat_idx": int(repeat_idx),
+                            "phase_signature": sig,
+                            "base_phase_id": int(base["phase_id"]),
+                            "base_phase_name": base["phase_name"],
+                            "repeat_phase_id": int(rep["phase_id"]),
+                            "repeat_phase_name": rep["phase_name"],
+                            "base_first50": float(base["phase_first50"]),
+                            "repeat_first50": float(rep["phase_first50"]),
+                            "repeat_first50_gain_pct": float(100.0 * (base["phase_first50"] - rep["phase_first50"]) / abs(base["phase_first50"])) if abs(float(base["phase_first50"])) > 1e-12 else np.nan,
+                            "base_last50": float(base["phase_last50"]),
+                            "repeat_last50": float(rep["phase_last50"]),
+                            "repeat_last50_gain_pct": float(100.0 * (base["phase_last50"] - rep["phase_last50"]) / abs(base["phase_last50"])) if abs(float(base["phase_last50"])) > 1e-12 else np.nan,
+                            "base_rolling50_min": float(base["phase_rolling50_min"]),
+                            "repeat_rolling50_min": float(rep["phase_rolling50_min"]),
+                        })
+
+    if round_frames:
+        pd.concat(round_frames, ignore_index=True).to_csv(os.path.join(output_dir, "dynamic_round_summary.csv"), index=False, encoding="utf-8-sig")
+    pd.DataFrame(phase_rows).to_csv(os.path.join(output_dir, "dynamic_phase_summary.csv"), index=False, encoding="utf-8-sig")
+    pd.DataFrame(transition_rows).to_csv(os.path.join(output_dir, "dynamic_transition_summary.csv"), index=False, encoding="utf-8-sig")
+    pd.DataFrame(repeated_rows).to_csv(os.path.join(output_dir, "dynamic_repeated_phase_summary.csv"), index=False, encoding="utf-8-sig")
+
+
+def run_dynamic_scenario_experiments(repeat_runs=1, selected_keys=None, output_dir=None, dynamic_schedule=None, dynamic_history_mode=None, dynamic_history_window=None, dynamic_context_topk=None):
+    """Run a continuous single-factory dynamic workload schedule.
+
+    This is intentionally implemented by converting the phase plan into
+    CFG.LAMBDA_SCHEDULE and CFG.TASK_TYPE_PROB_SCHEDULE, then calling the
+    normal scenario runner once per method.  Therefore BO/CBO agents are
+    initialized only once and keep their history across all phases.
+    """
+    phase_plan = parse_dynamic_schedule_arg(dynamic_schedule or getattr(CFG, "DYNAMIC_SCHEDULE", ""))
+    output_dir = os.path.abspath(output_dir or "dynamic_scenario_outputs")
+    os.makedirs(output_dir, exist_ok=True)
+
+    old_bo_iterations = int(CFG.BO_ITERATIONS)
+    old_session_duration = float(CFG.SESSION_DURATION)
+    old_lambda_schedule = list(CFG.LAMBDA_SCHEDULE)
+    old_thresholds = CFG.ARRIVAL_THRESHOLDS
+    old_task_probs = dict(CFG.TASK_TYPE_PROBS)
+    old_task_schedule = getattr(CFG, "TASK_TYPE_PROB_SCHEDULE", None)
+    old_dynamic_active = bool(getattr(CFG, "DYNAMIC_SCENARIO_ACTIVE", False))
+    old_dynamic_plan = list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or [])
+    old_dynamic_history_mode = getattr(CFG, "DYNAMIC_HISTORY_MODE", "all_history")
+    old_dynamic_history_window = getattr(CFG, "DYNAMIC_HISTORY_WINDOW", 200)
+    old_dynamic_context_topk = getattr(CFG, "DYNAMIC_CONTEXT_TOPK", 100)
+    old_bo_history_mode = getattr(CFG, "BO_HISTORY_MODE", getattr(CFG, "DEFAULT_BO_HISTORY_MODE", "recent"))
+    old_bo_recent_window = getattr(CFG, "BO_RECENT_WINDOW", getattr(CFG, "DEFAULT_BO_RECENT_WINDOW", 80))
+    old_cbo_history_select_mode = getattr(CFG, "CBO_HISTORY_SELECT_MODE", getattr(CFG, "DEFAULT_CBO_HISTORY_SELECT_MODE", "recent"))
+    old_cbo_context_k = getattr(CFG, "CBO_CONTEXT_K", getattr(CFG, "DEFAULT_CBO_CONTEXT_K", 50))
+
+    try:
+        CFG.DYNAMIC_SCENARIO_ACTIVE = True
+        CFG.DYNAMIC_PHASE_PLAN = list(phase_plan)
+        CFG.DYNAMIC_HISTORY_MODE = str(dynamic_history_mode or getattr(CFG, "DYNAMIC_HISTORY_MODE", "all_history"))
+        CFG.DYNAMIC_HISTORY_WINDOW = int(dynamic_history_window if dynamic_history_window is not None else getattr(CFG, "DYNAMIC_HISTORY_WINDOW", 200))
+        CFG.DYNAMIC_CONTEXT_TOPK = int(dynamic_context_topk if dynamic_context_topk is not None else getattr(CFG, "DYNAMIC_CONTEXT_TOPK", 100))
+        # Best-effort mapping from dynamic history mode to existing BO/CBO history knobs.
+        # all_history keeps all local BO samples; recent_window forgets older samples;
+        # context_topk asks CBO to prioritize context-nearest historical samples.
+        if CFG.DYNAMIC_HISTORY_MODE == "all_history":
+            CFG.BO_HISTORY_MODE = "all"
+        elif CFG.DYNAMIC_HISTORY_MODE == "recent_window":
+            CFG.BO_HISTORY_MODE = "recent"
+            CFG.BO_RECENT_WINDOW = int(CFG.DYNAMIC_HISTORY_WINDOW)
+        elif CFG.DYNAMIC_HISTORY_MODE == "context_topk":
+            CFG.BO_HISTORY_MODE = "all"
+            CFG.CBO_HISTORY_SELECT_MODE = "recent_context"
+            CFG.CBO_CONTEXT_K = int(CFG.DYNAMIC_CONTEXT_TOPK)
+        CFG.BO_ITERATIONS = int(sum(int(p["length"]) for p in phase_plan))
+        CFG.SESSION_DURATION = float(CFG.BO_ITERATIONS * float(getattr(CFG, "BO_INTERVAL", 1.0)))
+        CFG.LAMBDA_SCHEDULE = [(float(p["time_start"]), float(p["time_end"]), float(p["lambda"])) for p in phase_plan]
+        CFG.TASK_TYPE_PROB_SCHEDULE = [(float(p["time_start"]), float(p["time_end"]), dict(p["task_probs"])) for p in phase_plan]
+        CFG.TASK_TYPE_PROBS = dict(phase_plan[0]["task_probs"])
+        CFG.ARRIVAL_THRESHOLDS = infer_arrival_thresholds(CFG.LAMBDA_SCHEDULE)
+
+        with open(os.path.join(output_dir, "dynamic_run_config.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "dynamic_schedule_raw": dynamic_schedule,
+                "phase_plan": phase_plan,
+                "bo_iterations": int(CFG.BO_ITERATIONS),
+                "bo_interval": float(CFG.BO_INTERVAL),
+                "session_duration": float(CFG.SESSION_DURATION),
+                "lambda_schedule": list(CFG.LAMBDA_SCHEDULE),
+                "task_type_prob_schedule": list(CFG.TASK_TYPE_PROB_SCHEDULE),
+                "dynamic_history_mode": str(CFG.DYNAMIC_HISTORY_MODE),
+                "dynamic_history_window": int(CFG.DYNAMIC_HISTORY_WINDOW),
+                "dynamic_context_topk": int(CFG.DYNAMIC_CONTEXT_TOPK),
+                "selected_keys": selected_keys,
+                "repeat_runs": int(max(1, repeat_runs)),
+                "notes": "BO/CBO agents are initialized once per method and keep history across phase switches.",
+            }, f, ensure_ascii=False, indent=2)
+
+        print("=== Dynamic multi-phase scenario experiment ===")
+        print(f"[Dynamic] phases={len(phase_plan)} total_iters={CFG.BO_ITERATIONS} output={output_dir}")
+        for p in phase_plan:
+            print(f"  [Phase {p['phase_id']}] {p['phase_name']} iters={p['iter_start']}-{p['iter_end']} lambda={p['lambda']} probs=({p['rt_prob']:.2f},{p['batch_prob']:.2f},{p['ai_prob']:.2f})")
+        group_logs = run_scenario_method_experiments(repeat_runs=max(1, repeat_runs), selected_keys=selected_keys, output_dir=output_dir)
+        # Ensure logs are annotated even if the standard runner was called by an older patch path.
+        for info in group_logs.values():
+            for log in info.get("logs", []):
+                annotate_log_with_dynamic_phases(log, phase_plan)
+        save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir=output_dir)
+        print(f"=== Dynamic experiment finished. Output: {output_dir} ===")
+        return group_logs
+    finally:
+        CFG.BO_ITERATIONS = old_bo_iterations
+        CFG.SESSION_DURATION = old_session_duration
+        CFG.LAMBDA_SCHEDULE = old_lambda_schedule
+        CFG.ARRIVAL_THRESHOLDS = old_thresholds
+        CFG.TASK_TYPE_PROBS = old_task_probs
+        CFG.TASK_TYPE_PROB_SCHEDULE = old_task_schedule
+        CFG.DYNAMIC_SCENARIO_ACTIVE = old_dynamic_active
+        CFG.DYNAMIC_PHASE_PLAN = old_dynamic_plan
+        CFG.DYNAMIC_HISTORY_MODE = old_dynamic_history_mode
+        CFG.DYNAMIC_HISTORY_WINDOW = old_dynamic_history_window
+        CFG.DYNAMIC_CONTEXT_TOPK = old_dynamic_context_topk
+        CFG.BO_HISTORY_MODE = old_bo_history_mode
+        CFG.BO_RECENT_WINDOW = old_bo_recent_window
+        CFG.CBO_HISTORY_SELECT_MODE = old_cbo_history_select_mode
+        CFG.CBO_CONTEXT_K = old_cbo_context_k
+
+
 def run_scenario_method_experiments(repeat_runs=1, selected_keys=None, output_dir=None):
     """运行 Fixed / Vanilla BO / Context BO / Context+TR 对比。
 
@@ -1416,6 +1784,8 @@ def run_scenario_method_experiments(repeat_runs=1, selected_keys=None, output_di
         for group_key, group_cfg in groups.items():
             method_t0 = time.perf_counter()
             log = run_scenario_group(seed, group_key, group_cfg)
+            if bool(getattr(CFG, "DYNAMIC_SCENARIO_ACTIVE", False)):
+                annotate_log_with_dynamic_phases(log, getattr(CFG, "DYNAMIC_PHASE_PLAN", []))
             method_elapsed = time.perf_counter() - method_t0
             group_logs[group_key]["logs"].append(log)
 
