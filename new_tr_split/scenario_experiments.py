@@ -1693,6 +1693,15 @@ def run_dynamic_scenario_experiments(repeat_runs=1, selected_keys=None, output_d
             CFG.BO_HISTORY_MODE = "all"
             CFG.CBO_HISTORY_SELECT_MODE = "recent_context"
             CFG.CBO_CONTEXT_K = int(CFG.DYNAMIC_CONTEXT_TOPK)
+        elif CFG.DYNAMIC_HISTORY_MODE == "state_gated_kernel":
+            CFG.BO_HISTORY_MODE = "all"
+            CFG.CBO_HISTORY_SELECT_MODE = "state_gated_kernel"
+            CFG.CBO_CONTEXT_K = int(CFG.DYNAMIC_CONTEXT_TOPK)
+            # Preserve explicit --cbo-state-kernel-topk.
+            # Previously this line forced CBO_STATE_KERNEL_TOPK = DYNAMIC_CONTEXT_TOPK,
+            # so dynamic_scenario ignored user-provided top-k such as 80 or 60.
+            if not hasattr(CFG, "CBO_STATE_KERNEL_TOPK") or CFG.CBO_STATE_KERNEL_TOPK is None:
+                CFG.CBO_STATE_KERNEL_TOPK = int(CFG.DYNAMIC_CONTEXT_TOPK)
         CFG.BO_ITERATIONS = int(sum(int(p["length"]) for p in phase_plan))
         CFG.SESSION_DURATION = float(CFG.BO_ITERATIONS * float(getattr(CFG, "BO_INTERVAL", 1.0)))
         CFG.LAMBDA_SCHEDULE = [(float(p["time_start"]), float(p["time_end"]), float(p["lambda"])) for p in phase_plan]
@@ -1712,6 +1721,13 @@ def run_dynamic_scenario_experiments(repeat_runs=1, selected_keys=None, output_d
                 "dynamic_history_mode": str(CFG.DYNAMIC_HISTORY_MODE),
                 "dynamic_history_window": int(CFG.DYNAMIC_HISTORY_WINDOW),
                 "dynamic_context_topk": int(CFG.DYNAMIC_CONTEXT_TOPK),
+                "cbo_history_select_mode_effective": str(getattr(CFG, "CBO_HISTORY_SELECT_MODE", "recent")),
+                "cbo_state_kernel_topk": int(getattr(CFG, "CBO_STATE_KERNEL_TOPK", getattr(CFG, "DYNAMIC_CONTEXT_TOPK", 100))),
+                "cbo_state_kernel_threshold": float(getattr(CFG, "CBO_STATE_KERNEL_THRESHOLD", 0.05)),
+                "cbo_state_kernel_rate_gain": float(getattr(CFG, "CBO_STATE_KERNEL_RATE_GAIN", 1.0)),
+                "cbo_state_kernel_rate_power": float(getattr(CFG, "CBO_STATE_KERNEL_RATE_POWER", 1.0)),
+                "cbo_state_kernel_max_rate_dist": float(getattr(CFG, "CBO_STATE_KERNEL_MAX_RATE_DIST", 3.0)),
+                "cbo_state_kernel_rate_sign_veto": bool(getattr(CFG, "CBO_STATE_KERNEL_RATE_SIGN_VETO", True)),
                 "selected_keys": selected_keys,
                 "repeat_runs": int(max(1, repeat_runs)),
                 "notes": "BO/CBO agents are initialized once per method and keep history across phase switches.",

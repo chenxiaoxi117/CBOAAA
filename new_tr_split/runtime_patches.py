@@ -131,6 +131,22 @@ def apply_cbo_stability_policy_override(groups):
         "cbo_robust_std_weight": _cbo_cli_option("--cbo-robust-std-weight", "CBO_ROBUST_STD_WEIGHT", 0.5),
         "cbo_theta_merge_eps": _cbo_cli_option("--cbo-theta-merge-eps", "CBO_THETA_MERGE_EPS", 0.05),
         "cbo_context_sim_threshold": _cbo_cli_option("--cbo-context-sim-threshold", "CBO_CONTEXT_SIM_THRESHOLD", 0.0),
+        "cbo_state_kernel_topk": _cbo_cli_option("--cbo-state-kernel-topk", "CBO_STATE_KERNEL_TOPK", 100),
+        "cbo_state_kernel_min_rows": _cbo_cli_option("--cbo-state-kernel-min-rows", "CBO_STATE_KERNEL_MIN_ROWS", 20),
+        "cbo_state_kernel_recent_keep": _cbo_cli_option("--cbo-state-kernel-recent-keep", "CBO_STATE_KERNEL_RECENT_KEEP", 20),
+        "cbo_state_kernel_threshold": _cbo_cli_option("--cbo-state-kernel-threshold", "CBO_STATE_KERNEL_THRESHOLD", 0.05),
+        "cbo_state_kernel_fallback": _cbo_cli_option("--cbo-state-kernel-fallback", "CBO_STATE_KERNEL_FALLBACK", "recent_context"),
+        "cbo_state_kernel_max_workload_dist": _cbo_cli_option("--cbo-state-kernel-max-workload-dist", "CBO_STATE_KERNEL_MAX_WORKLOAD_DIST", 3.0),
+        "cbo_state_kernel_max_state_dist": _cbo_cli_option("--cbo-state-kernel-max-state-dist", "CBO_STATE_KERNEL_MAX_STATE_DIST", 3.0),
+        "cbo_state_kernel_max_trend_dist": _cbo_cli_option("--cbo-state-kernel-max-trend-dist", "CBO_STATE_KERNEL_MAX_TREND_DIST", 3.0),
+        "cbo_state_kernel_max_unfinished_diff": _cbo_cli_option("--cbo-state-kernel-max-unfinished-diff", "CBO_STATE_KERNEL_MAX_UNFINISHED_DIFF", 0.30),
+        "cbo_state_kernel_max_backlog_diff": _cbo_cli_option("--cbo-state-kernel-max-backlog-diff", "CBO_STATE_KERNEL_MAX_BACKLOG_DIFF", 0.50),
+        "cbo_state_kernel_trend_sign_veto": _cbo_cli_option("--cbo-state-kernel-trend-sign-veto", "CBO_STATE_KERNEL_TREND_SIGN_VETO", True),
+        "cbo_state_kernel_trend_sign_min": _cbo_cli_option("--cbo-state-kernel-trend-sign-min", "CBO_STATE_KERNEL_TREND_SIGN_MIN", 0.02),
+        "cbo_state_kernel_rate_gain": _cbo_cli_option("--cbo-state-kernel-rate-gain", "CBO_STATE_KERNEL_RATE_GAIN", 1.0),
+        "cbo_state_kernel_rate_power": _cbo_cli_option("--cbo-state-kernel-rate-power", "CBO_STATE_KERNEL_RATE_POWER", 1.0),
+        "cbo_state_kernel_max_rate_dist": _cbo_cli_option("--cbo-state-kernel-max-rate-dist", "CBO_STATE_KERNEL_MAX_RATE_DIST", 3.0),
+        "cbo_state_kernel_rate_sign_veto": _cbo_cli_option("--cbo-state-kernel-rate-sign-veto", "CBO_STATE_KERNEL_RATE_SIGN_VETO", True),
         "cbo_tr_mode": _cbo_cli_option("--cbo-tr-mode", "CBO_TR_MODE", "off"),
         "cbo_tr_radius_init": _cbo_cli_option("--cbo-tr-radius-init", "CBO_TR_RADIUS_INIT", getattr(CFG, "TRUST_RADIUS_INIT", 0.10)),
         "cbo_tr_radius_min": _cbo_cli_option("--cbo-tr-radius-min", "CBO_TR_RADIUS_MIN", getattr(CFG, "TRUST_RADIUS_MIN", 0.04)),
@@ -191,6 +207,21 @@ def apply_cbo_stability_policy_override(groups):
         "cbo_selection_cooldown": _cbo_cli_option("--cbo-selection-cooldown", "CBO_SELECTION_COOLDOWN", 5),
         "cbo_condition_anchor_switch": _cbo_cli_option("--cbo-condition-anchor-switch", "CBO_CONDITION_ANCHOR_SWITCH", "context_best"),
     }
+    # dynamic_scenario may request a history selector through --dynamic-history-mode
+    # without also passing --cbo-history-select-mode. Treat that as an explicit
+    # CBO override so method-level defaults do not reset it to "recent".
+    dynamic_mode = str(getattr(CFG, "DYNAMIC_HISTORY_MODE", "") or "").strip().lower() if bool(getattr(CFG, "DYNAMIC_SCENARIO_ACTIVE", False)) else ""
+    if dynamic_mode == "context_topk" and values.get("cbo_history_select_mode") is None:
+        values["cbo_history_select_mode"] = "recent_context"
+        values["cbo_context_k"] = int(getattr(CFG, "DYNAMIC_CONTEXT_TOPK", getattr(CFG, "CBO_CONTEXT_K", 100)))
+    elif dynamic_mode == "state_gated_kernel" and values.get("cbo_history_select_mode") is None:
+        values["cbo_history_select_mode"] = "state_gated_kernel"
+        values["cbo_context_k"] = int(getattr(CFG, "DYNAMIC_CONTEXT_TOPK", getattr(CFG, "CBO_CONTEXT_K", 100)))
+        values["cbo_state_kernel_topk"] = int(getattr(CFG, "CBO_STATE_KERNEL_TOPK", getattr(CFG, "DYNAMIC_CONTEXT_TOPK", 100)))
+        values["cbo_state_kernel_rate_gain"] = float(getattr(CFG, "CBO_STATE_KERNEL_RATE_GAIN", 1.0))
+        values["cbo_state_kernel_rate_power"] = float(getattr(CFG, "CBO_STATE_KERNEL_RATE_POWER", 1.0))
+        values["cbo_state_kernel_max_rate_dist"] = float(getattr(CFG, "CBO_STATE_KERNEL_MAX_RATE_DIST", getattr(CFG, "CBO_STATE_KERNEL_MAX_TREND_DIST", 3.0)))
+        values["cbo_state_kernel_rate_sign_veto"] = bool(getattr(CFG, "CBO_STATE_KERNEL_RATE_SIGN_VETO", True))
     any_explicit = any(v is not None for v in values.values())
     for group_key, group_cfg in (groups or {}).items():
         if _is_cbo_method_key(group_key, group_cfg):
@@ -1579,7 +1610,23 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "selected_recent_count", "selected_macro_count", "selected_context_count", "selected_elite_count",
             "selected_diverse_count", "selected_total_count", "selected_warm_rows_count",
             "selected_local_rows_count", "cbo_warm_start_used_rows", "context_similarity_max",
-            "context_similarity_mean", "elite_best_robust_score", "elite_best_eval_count",
+            "context_similarity_mean",
+            "state_kernel_enabled", "state_kernel_topk", "state_kernel_min_rows",
+            "state_kernel_recent_keep", "state_kernel_threshold", "state_kernel_raw_records",
+            "state_kernel_passed_count", "state_kernel_rejected_count",
+            "state_kernel_reject_reason_counts", "state_kernel_selected_count",
+            "state_kernel_fallback_used", "state_kernel_fallback_reason",
+            "state_kernel_similarity_max", "state_kernel_similarity_mean", "state_kernel_similarity_p50",
+            "state_kernel_selected_similarity_mean", "state_kernel_selected_similarity_min", "state_kernel_selected_similarity_max",
+            "state_kernel_current_total_norm", "state_kernel_current_rt_ratio", "state_kernel_current_batch_ratio",
+            "state_kernel_current_backlog_norm", "state_kernel_current_unfinished_rate",
+            "state_kernel_current_backlog_trend", "state_kernel_current_unfinished_trend", "state_kernel_current_cost_trend",
+            "state_kernel_current_delay_trend", "state_kernel_rate_gain", "state_kernel_rate_power",
+            "state_kernel_max_rate_dist", "state_kernel_rate_distance_mean", "state_kernel_rate_distance_p50",
+            "state_kernel_rate_distance_max", "state_kernel_selected_rate_distance_mean",
+            "state_kernel_rate_sign_veto",
+            "state_kernel_selected_phase_counts",
+            "elite_best_robust_score", "elite_best_eval_count",
             "elite_best_mean_cost", "elite_best_std_cost", "cbo_tr_mode", "cbo_tr_anchor_mode",
             "cbo_tr_radius", "cbo_tr_anchor_theta", "cbo_tr_candidate_count",
             "cbo_global_candidate_count", "cbo_tr_update_reason", "cbo_tr_success_count",
@@ -2253,6 +2300,7 @@ LITE_CONTEXT_MODE_SPECS = {
     "pressure_taskmix_counts": {"label": "pressure_taskmix_counts", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]},
     "pressure_task_mix_counts": {"label": "pressure_taskmix_counts", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]},
     "ptc": {"label": "pressure_taskmix_counts", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]},
+    "pressure_prev_unfinished_5d": {"label": "pressure_prev_unfinished_5d", "indices": [1, 2, 3, 4, 15]},
     "pressure_prev_unfinished_context": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
     "pressure_taskmix_counts_prev_unfinished": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
     "prev_unfinished_context": {"label": "pressure_prev_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15]},
@@ -3268,6 +3316,25 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_robust_std_weight = float(group_cfg.get("cbo_robust_std_weight", _cfg_cbo_float("CBO_ROBUST_STD_WEIGHT", 0.5)))
     agent.cbo_theta_merge_eps = float(group_cfg.get("cbo_theta_merge_eps", _cfg_cbo_float("CBO_THETA_MERGE_EPS", 0.05)))
     agent.cbo_context_sim_threshold = float(group_cfg.get("cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+    agent.cbo_state_kernel_topk = int(group_cfg.get("cbo_state_kernel_topk", _cfg_cbo_int("CBO_STATE_KERNEL_TOPK", 100)))
+    agent.cbo_state_kernel_min_rows = int(group_cfg.get("cbo_state_kernel_min_rows", _cfg_cbo_int("CBO_STATE_KERNEL_MIN_ROWS", 20)))
+    agent.cbo_state_kernel_recent_keep = int(group_cfg.get("cbo_state_kernel_recent_keep", _cfg_cbo_int("CBO_STATE_KERNEL_RECENT_KEEP", 20)))
+    agent.cbo_state_kernel_threshold = float(group_cfg.get("cbo_state_kernel_threshold", _cfg_cbo_float("CBO_STATE_KERNEL_THRESHOLD", 0.05)))
+    agent.cbo_state_kernel_fallback = str(group_cfg.get("cbo_state_kernel_fallback", _cfg_cbo_str("CBO_STATE_KERNEL_FALLBACK", "recent_context"))).strip().lower()
+    agent.cbo_state_kernel_max_workload_dist = float(group_cfg.get("cbo_state_kernel_max_workload_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_WORKLOAD_DIST", 3.0)))
+    agent.cbo_state_kernel_max_state_dist = float(group_cfg.get("cbo_state_kernel_max_state_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_STATE_DIST", 3.0)))
+    agent.cbo_state_kernel_max_trend_dist = float(group_cfg.get("cbo_state_kernel_max_trend_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_TREND_DIST", 3.0)))
+    agent.cbo_state_kernel_max_unfinished_diff = float(group_cfg.get("cbo_state_kernel_max_unfinished_diff", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_UNFINISHED_DIFF", 0.30)))
+    agent.cbo_state_kernel_max_backlog_diff = float(group_cfg.get("cbo_state_kernel_max_backlog_diff", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_BACKLOG_DIFF", 0.50)))
+    agent.cbo_state_kernel_trend_sign_veto = bool(group_cfg.get("cbo_state_kernel_trend_sign_veto", getattr(CFG, "CBO_STATE_KERNEL_TREND_SIGN_VETO", True)))
+    agent.cbo_state_kernel_trend_sign_min = float(group_cfg.get("cbo_state_kernel_trend_sign_min", _cfg_cbo_float("CBO_STATE_KERNEL_TREND_SIGN_MIN", 0.02)))
+    agent.cbo_state_kernel_rate_gain = float(group_cfg.get("cbo_state_kernel_rate_gain", _cfg_cbo_float("CBO_STATE_KERNEL_RATE_GAIN", 1.0)))
+    agent.cbo_state_kernel_rate_power = float(group_cfg.get("cbo_state_kernel_rate_power", _cfg_cbo_float("CBO_STATE_KERNEL_RATE_POWER", 1.0)))
+    agent.cbo_state_kernel_max_rate_dist = float(group_cfg.get("cbo_state_kernel_max_rate_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_RATE_DIST", 3.0)))
+    agent.cbo_state_kernel_rate_sign_veto = bool(group_cfg.get("cbo_state_kernel_rate_sign_veto", getattr(CFG, "CBO_STATE_KERNEL_RATE_SIGN_VETO", True)))
+    agent.cbo_state_kernel_backlog_ref = float(group_cfg.get("cbo_state_kernel_backlog_ref", _cfg_cbo_float("CBO_STATE_KERNEL_BACKLOG_REF", 500.0)))
+    agent.cbo_state_kernel_cost_ref = float(group_cfg.get("cbo_state_kernel_cost_ref", _cfg_cbo_float("CBO_STATE_KERNEL_COST_REF", 20000.0)))
+    agent.cbo_state_kernel_delay_ref = float(group_cfg.get("cbo_state_kernel_delay_ref", _cfg_cbo_float("CBO_STATE_KERNEL_DELAY_REF", 30.0)))
     agent.cbo_tr_mode = str(group_cfg.get("cbo_tr_mode", _cfg_cbo_str("CBO_TR_MODE", "off")) if agent.is_cbo_stability_enabled else "off").strip().lower()
     agent.cbo_tr_anchor_mode = str(group_cfg.get("cbo_tr_anchor_mode", _cfg_cbo_str("CBO_TR_ANCHOR_MODE", "posterior_mean"))).strip().lower()
     agent.cbo_tr_radius_min = float(group_cfg.get("cbo_tr_radius_min", _cfg_cbo_float("CBO_TR_RADIUS_MIN", getattr(CFG, "TRUST_RADIUS_MIN", 0.04))))
@@ -3383,9 +3450,22 @@ def agent_tell_with_feedback_meta(agent, theta, cost, state=None, context=None, 
                     "arrivals_total", "arrivals_rt", "arrivals_batch", "arrivals_ai",
                     "rt_arrival_ratio", "batch_arrival_ratio", "ai_arrival_ratio",
                     "completed_total", "task_count", "unfinished_end", "backlog",
+                    "avg_util", "max_util", "avg_delay", "cost",
                 ]:
                     if macro_key in metrics:
                         rec[macro_key] = metrics.get(macro_key)
+            try:
+                phase_id, phase_name = _cbo_dynamic_phase_for_iter(bo_iter)
+                if phase_id is not None:
+                    rec["dynamic_phase_id"] = int(phase_id)
+                    rec["dynamic_phase_name"] = str(phase_name)
+            except Exception:
+                pass
+            try:
+                trends = _cbo_recent_trends_from_records([agent._unpack_sample(s) for s in getattr(agent, "local_recent", [])])
+                rec.update({k: float(v) for k, v in trends.items()})
+            except Exception:
+                pass
             try:
                 theta_norm = agent._normalize_theta(theta)
                 prev_best = getattr(agent, "prev_best", None)
@@ -3550,6 +3630,303 @@ def _cbo_macro_similarity(agent, macro_a, macro_b):
         return 0.0
 
 
+
+# ---------------------------------------------------------------------------
+# State-gated product-kernel history selection
+# ---------------------------------------------------------------------------
+def _cbo_dynamic_phase_for_iter(bo_iter):
+    try:
+        it = int(bo_iter) + 1
+        for p in list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or []):
+            if int(p.get("iter_start", -1)) <= it <= int(p.get("iter_end", -2)):
+                return int(p.get("phase_id", -1)), str(p.get("phase_name", ""))
+    except Exception:
+        pass
+    return None, ""
+
+
+def _cbo_context_name_map(agent, context):
+    out = {}
+    if context is None or not getattr(agent, "use_context", False):
+        return out
+    try:
+        names = lite_context_feature_names(getattr(agent, "context_mode", "lite"))
+        ctx = list(agent._normalize_context(context))
+        for i, name in enumerate(names[:len(ctx)]):
+            try:
+                out[str(name)] = float(ctx[i])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def _cbo_metric_or_context(rec, ctx_map, keys, default=np.nan):
+    metrics = rec.get("metrics") if isinstance(rec, dict) else None
+    for key in keys:
+        try:
+            if isinstance(ctx_map, dict) and key in ctx_map and ctx_map.get(key) is not None:
+                return float(ctx_map.get(key))
+            if isinstance(rec, dict) and key in rec and rec.get(key) is not None:
+                return float(rec.get(key))
+            if isinstance(metrics, dict) and key in metrics and metrics.get(key) is not None:
+                return float(metrics.get(key))
+        except Exception:
+            continue
+    return default
+
+
+def _cbo_recent_trends_from_records(records, backlog_ref=None, cost_ref=None, delay_ref=None):
+    backlog_ref = max(1e-9, float(backlog_ref if backlog_ref is not None else getattr(CFG, "CBO_STATE_KERNEL_BACKLOG_REF", 500.0)))
+    cost_ref = max(1e-9, float(cost_ref if cost_ref is not None else getattr(CFG, "CBO_STATE_KERNEL_COST_REF", 20000.0)))
+    delay_ref = max(1e-9, float(delay_ref if delay_ref is not None else getattr(CFG, "CBO_STATE_KERNEL_DELAY_REF", 30.0)))
+    vals = []
+    for rec in list(records or []):
+        if not isinstance(rec, dict):
+            continue
+        backlog = _cbo_rec_value(rec, ["backlog", "unfinished_end", "Backlog_积压任务数"], np.nan)
+        unfinished = _cbo_rec_value(rec, ["unfinished_end", "backlog"], np.nan)
+        arrivals = _cbo_rec_value(rec, ["arrivals_total", "task_count", "generated_total"], np.nan)
+        cost = _cbo_record_cost(rec)
+        if not np.isfinite(cost):
+            cost = _cbo_rec_value(rec, ["cost", "Eval_Cost_最终评估Cost"], np.nan)
+        delay = _cbo_rec_value(rec, ["avg_delay", "Avg_Delay_平均时延", "delay", "mean_delay"], np.nan)
+        unfinished_rate = np.nan
+        if np.isfinite(unfinished):
+            unfinished_rate = float(unfinished) / max(1.0, float(np.nan_to_num(arrivals, nan=0.0)) + float(unfinished))
+        vals.append({
+            "backlog": float(backlog) / backlog_ref if np.isfinite(backlog) else np.nan,
+            "unfinished_rate": float(unfinished_rate) if np.isfinite(unfinished_rate) else np.nan,
+            "cost": float(cost) / cost_ref if np.isfinite(cost) else np.nan,
+            "delay": float(delay) / delay_ref if np.isfinite(delay) else np.nan,
+        })
+    if len(vals) < 6:
+        return {"backlog_trend": 0.0, "unfinished_rate_trend": 0.0, "recent_cost_trend": 0.0, "recent_delay_trend": 0.0}
+    tail = vals[-min(len(vals), 40):]
+    mid = max(1, len(tail) // 2)
+    prev = tail[:mid]
+    curr = tail[mid:]
+
+    def mean_delta(key):
+        a = np.asarray([v.get(key, np.nan) for v in prev], dtype=float)
+        b = np.asarray([v.get(key, np.nan) for v in curr], dtype=float)
+        if not np.isfinite(a).any() or not np.isfinite(b).any():
+            return 0.0
+        return float(np.nanmean(b) - np.nanmean(a))
+
+    return {
+        "backlog_trend": mean_delta("backlog"),
+        "unfinished_rate_trend": mean_delta("unfinished_rate"),
+        "recent_cost_trend": mean_delta("cost"),
+        "recent_delay_trend": mean_delta("delay"),
+    }
+
+
+def _cbo_rate_metric_or_context(rec, ctx_map, rate_keys, raw_keys=None, ref=1.0, default=np.nan):
+    """Read a normalized rate/trend value, falling back to raw delta/ref.
+
+    This is intentionally permissive because different diagnostics use
+    backlog_growth_rate/backlog_growth/backlog_trend style names.
+    """
+    val = _cbo_metric_or_context(rec, ctx_map, list(rate_keys or []), np.nan)
+    if np.isfinite(val):
+        return float(val)
+    if raw_keys:
+        raw = _cbo_metric_or_context(rec, ctx_map, list(raw_keys or []), np.nan)
+        if np.isfinite(raw):
+            return float(raw) / max(1e-9, float(ref))
+    return default
+
+
+def _cbo_state_kernel_cfg(agent):
+    return {
+        "topk": max(1, int(getattr(agent, "cbo_state_kernel_topk", _cfg_cbo_int("CBO_STATE_KERNEL_TOPK", 100)))),
+        "min_rows": max(2, int(getattr(agent, "cbo_state_kernel_min_rows", _cfg_cbo_int("CBO_STATE_KERNEL_MIN_ROWS", 20)))),
+        "recent_keep": max(0, int(getattr(agent, "cbo_state_kernel_recent_keep", _cfg_cbo_int("CBO_STATE_KERNEL_RECENT_KEEP", 20)))),
+        "threshold": max(0.0, float(getattr(agent, "cbo_state_kernel_threshold", _cfg_cbo_float("CBO_STATE_KERNEL_THRESHOLD", 0.05)))),
+        "fallback": str(getattr(agent, "cbo_state_kernel_fallback", _cfg_cbo_str("CBO_STATE_KERNEL_FALLBACK", "recent_context")) or "recent_context").strip().lower(),
+        "max_workload_dist": max(0.0, float(getattr(agent, "cbo_state_kernel_max_workload_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_WORKLOAD_DIST", 3.0)))),
+        "max_state_dist": max(0.0, float(getattr(agent, "cbo_state_kernel_max_state_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_STATE_DIST", 3.0)))),
+        "max_trend_dist": max(0.0, float(getattr(agent, "cbo_state_kernel_max_trend_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_TREND_DIST", 3.0)))),
+        "max_unfinished_diff": max(0.0, float(getattr(agent, "cbo_state_kernel_max_unfinished_diff", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_UNFINISHED_DIFF", 0.30)))),
+        "max_backlog_diff": max(0.0, float(getattr(agent, "cbo_state_kernel_max_backlog_diff", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_BACKLOG_DIFF", 0.50)))),
+        "trend_sign_veto": bool(getattr(agent, "cbo_state_kernel_trend_sign_veto", getattr(CFG, "CBO_STATE_KERNEL_TREND_SIGN_VETO", True))),
+        "trend_sign_min": max(0.0, float(getattr(agent, "cbo_state_kernel_trend_sign_min", _cfg_cbo_float("CBO_STATE_KERNEL_TREND_SIGN_MIN", 0.02)))),
+        "rate_gain": max(0.0, float(getattr(agent, "cbo_state_kernel_rate_gain", _cfg_cbo_float("CBO_STATE_KERNEL_RATE_GAIN", 1.0)))),
+        "rate_power": max(1.0, float(getattr(agent, "cbo_state_kernel_rate_power", _cfg_cbo_float("CBO_STATE_KERNEL_RATE_POWER", 1.0)))),
+        "max_rate_dist": max(0.0, float(getattr(agent, "cbo_state_kernel_max_rate_dist", _cfg_cbo_float("CBO_STATE_KERNEL_MAX_RATE_DIST", 3.0)))),
+        "rate_sign_veto": bool(getattr(agent, "cbo_state_kernel_rate_sign_veto", getattr(CFG, "CBO_STATE_KERNEL_RATE_SIGN_VETO", True))),
+        "backlog_ref": max(1e-9, float(getattr(agent, "cbo_state_kernel_backlog_ref", _cfg_cbo_float("CBO_STATE_KERNEL_BACKLOG_REF", 500.0)))),
+        "cost_ref": max(1e-9, float(getattr(agent, "cbo_state_kernel_cost_ref", _cfg_cbo_float("CBO_STATE_KERNEL_COST_REF", 20000.0)))),
+        "delay_ref": max(1e-9, float(getattr(agent, "cbo_state_kernel_delay_ref", _cfg_cbo_float("CBO_STATE_KERNEL_DELAY_REF", 30.0)))),
+    }
+
+
+def _cbo_state_kernel_features(agent, rec=None, context=None, all_records=None, current=False):
+    cfg = _cbo_state_kernel_cfg(agent)
+    rec = rec if isinstance(rec, dict) else {}
+    ctx_map = _cbo_context_name_map(agent, context if context is not None else rec.get("context"))
+    macro_scale = _cbo_macro_total_scale(agent, all_records or [])
+    macro = _cbo_macro_context_from_context(agent, context, records=all_records, scale=macro_scale) if current else _cbo_macro_context_from_record(agent, rec, records=all_records, scale=macro_scale)
+
+    arrival_rate = _cbo_metric_or_context(rec, ctx_map, ["arrival_rate_recent"], np.nan)
+    total_norm = float(macro.get("total_arrivals_norm", np.nan))
+    if np.isfinite(arrival_rate):
+        total_norm = float(arrival_rate) / max(1.0, float(getattr(CFG, "STATE_KERNEL_LAMBDA_REF", 5.0)))
+    rt_ratio = _cbo_metric_or_context(rec, ctx_map, ["cfg_rt_prob", "prev_rt_arrival_ratio", "rt_arrival_ratio"], macro.get("rt_ratio", np.nan))
+    batch_ratio = _cbo_metric_or_context(rec, ctx_map, ["cfg_batch_prob", "prev_batch_arrival_ratio", "batch_arrival_ratio"], macro.get("batch_ratio", np.nan))
+
+    backlog_raw = _cbo_metric_or_context(rec, ctx_map, ["start_backlog", "backlog", "unfinished_end"], np.nan)
+    backlog_norm = float(backlog_raw) / cfg["backlog_ref"] if np.isfinite(backlog_raw) else np.nan
+    unfinished_rate = _cbo_metric_or_context(rec, ctx_map, ["prev_unfinished_rate", "recent_unfinished_rate_mean", "unfinished_rate"], np.nan)
+    if not np.isfinite(unfinished_rate):
+        unfinished = _cbo_metric_or_context(rec, ctx_map, ["unfinished_end", "backlog"], np.nan)
+        arrivals = _cbo_metric_or_context(rec, ctx_map, ["arrivals_total", "task_count", "generated_total"], np.nan)
+        if np.isfinite(unfinished):
+            unfinished_rate = float(unfinished) / max(1.0, float(np.nan_to_num(arrivals, nan=0.0)) + float(unfinished))
+    avg_util = _cbo_metric_or_context(rec, ctx_map, ["start_avg_util", "avg_util"], np.nan)
+    max_util = _cbo_metric_or_context(rec, ctx_map, ["start_max_util", "max_util"], np.nan)
+
+    if current:
+        trends = _cbo_recent_trends_from_records([agent._unpack_sample(s) for s in getattr(agent, "local_recent", [])], cfg["backlog_ref"], cfg["cost_ref"], cfg["delay_ref"])
+        # Context trend/rate, if present, is more immediate than sample-level estimate.
+        ctx_backlog_trend = _cbo_rate_metric_or_context(rec, ctx_map, ["backlog_growth_rate", "backlog_trend", "backlog_trend_norm"], ["backlog_growth"], cfg["backlog_ref"], np.nan)
+        if np.isfinite(ctx_backlog_trend):
+            trends["backlog_trend"] = float(ctx_backlog_trend)
+        if "unfinished_rate_trend" in ctx_map:
+            trends["unfinished_rate_trend"] = float(ctx_map.get("unfinished_rate_trend"))
+        ctx_cost_trend = _cbo_rate_metric_or_context(rec, ctx_map, ["recent_cost_trend", "cost_trend", "cost_growth_rate"], ["cost_growth"], cfg["cost_ref"], np.nan)
+        if np.isfinite(ctx_cost_trend):
+            trends["recent_cost_trend"] = float(ctx_cost_trend)
+        ctx_delay_trend = _cbo_rate_metric_or_context(rec, ctx_map, ["recent_delay_trend", "delay_trend", "delay_growth_rate"], ["delay_growth"], cfg["delay_ref"], np.nan)
+        if np.isfinite(ctx_delay_trend):
+            trends["recent_delay_trend"] = float(ctx_delay_trend)
+    else:
+        trends = {
+            "backlog_trend": _cbo_rate_metric_or_context(rec, ctx_map, ["backlog_growth_rate", "backlog_trend", "backlog_trend_norm"], ["backlog_growth"], cfg["backlog_ref"], 0.0),
+            "unfinished_rate_trend": _cbo_metric_or_context(rec, ctx_map, ["unfinished_rate_trend"], 0.0),
+            "recent_cost_trend": _cbo_rate_metric_or_context(rec, ctx_map, ["recent_cost_trend", "cost_trend", "cost_growth_rate"], ["cost_growth"], cfg["cost_ref"], 0.0),
+            "recent_delay_trend": _cbo_rate_metric_or_context(rec, ctx_map, ["recent_delay_trend", "delay_trend", "delay_growth_rate"], ["delay_growth"], cfg["delay_ref"], 0.0),
+        }
+
+    return {
+        "workload": np.asarray([total_norm, rt_ratio, batch_ratio], dtype=float),
+        "state": np.asarray([backlog_norm, unfinished_rate, avg_util, max_util], dtype=float),
+        "trend": np.asarray([trends.get("backlog_trend", 0.0), trends.get("unfinished_rate_trend", 0.0), trends.get("recent_cost_trend", 0.0), trends.get("recent_delay_trend", 0.0)], dtype=float),
+        "raw": {
+            "total_norm": total_norm,
+            "rt_ratio": rt_ratio,
+            "batch_ratio": batch_ratio,
+            "backlog_norm": backlog_norm,
+            "unfinished_rate": unfinished_rate,
+            "avg_util": avg_util,
+            "max_util": max_util,
+            **trends,
+        }
+    }
+
+
+def _cbo_scaled_group_distance(a, b, lengths):
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    lengths = np.asarray(lengths, dtype=float)
+    mask = np.isfinite(a) & np.isfinite(b) & np.isfinite(lengths) & (np.abs(lengths) > 1e-12)
+    if not mask.any():
+        return 0.0, 0
+    diff = (a[mask] - b[mask]) / np.maximum(np.abs(lengths[mask]), 1e-12)
+    return float(np.linalg.norm(diff)), int(mask.sum())
+
+
+def _cbo_state_kernel_similarity(agent, context, rec, all_records=None, current_feat=None):
+    cfg = _cbo_state_kernel_cfg(agent)
+    cur = current_feat or _cbo_state_kernel_features(agent, context=context, all_records=all_records, current=True)
+    ref = _cbo_state_kernel_features(agent, rec=rec, all_records=all_records, current=False)
+    lw = [
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_WORKLOAD_TOTAL", 0.35),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_WORKLOAD_RT", 0.20),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_WORKLOAD_BATCH", 0.20),
+    ]
+    ls = [
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_STATE_BACKLOG", 0.25),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_STATE_UNFINISHED", 0.15),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_STATE_AVG_UTIL", 0.20),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_STATE_MAX_UTIL", 0.20),
+    ]
+    lt = [
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_TREND_BACKLOG", 0.20),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_TREND_UNFINISHED", 0.10),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_TREND_COST", 0.20),
+        _cfg_cbo_float("CBO_STATE_KERNEL_LS_TREND_DELAY", 0.20),
+    ]
+    dw, nw = _cbo_scaled_group_distance(cur["workload"], ref["workload"], lw)
+    ds, ns = _cbo_scaled_group_distance(cur["state"], ref["state"], ls)
+    dt_base, nt = _cbo_scaled_group_distance(cur["trend"], ref["trend"], lt)
+    if nt > 0:
+        # Amplify internal rate/trend differences.  This keeps the old
+        # distance when gain=1 and power=1, but lets RT-heavy states with
+        # similar absolute context and different growth rates separate.
+        dt = float(cfg["rate_gain"]) * (float(dt_base) ** float(cfg["rate_power"]))
+    else:
+        dt = float(dt_base)
+    reason = "pass"
+    passed = True
+    if nw > 0 and dw > cfg["max_workload_dist"]:
+        passed, reason = False, "workload_dist"
+    elif ns > 0 and ds > cfg["max_state_dist"]:
+        passed, reason = False, "state_dist"
+    elif nt > 0 and dt_base > cfg["max_trend_dist"]:
+        passed, reason = False, "trend_dist"
+    elif nt > 0 and dt > cfg["max_rate_dist"]:
+        passed, reason = False, "rate_dist"
+    else:
+        cb = cur["raw"].get("backlog_norm", np.nan); rb = ref["raw"].get("backlog_norm", np.nan)
+        cu = cur["raw"].get("unfinished_rate", np.nan); ru = ref["raw"].get("unfinished_rate", np.nan)
+        if np.isfinite(cb) and np.isfinite(rb) and abs(float(cb) - float(rb)) > cfg["max_backlog_diff"]:
+            passed, reason = False, "backlog_diff"
+        elif np.isfinite(cu) and np.isfinite(ru) and abs(float(cu) - float(ru)) > cfg["max_unfinished_diff"]:
+            passed, reason = False, "unfinished_diff"
+        elif cfg["trend_sign_veto"] or cfg["rate_sign_veto"]:
+            for key in ["backlog_trend", "unfinished_rate_trend", "recent_cost_trend", "recent_delay_trend"]:
+                a = float(cur["raw"].get(key, 0.0) or 0.0)
+                b = float(ref["raw"].get(key, 0.0) or 0.0)
+                if abs(a) >= cfg["trend_sign_min"] and abs(b) >= cfg["trend_sign_min"] and a * b < 0:
+                    passed, reason = False, "rate_sign" if cfg["rate_sign_veto"] else "trend_sign"
+                    break
+    kw = float(np.exp(-0.5 * dw * dw)) if nw > 0 else 1.0
+    ks = float(np.exp(-0.5 * ds * ds)) if ns > 0 else 1.0
+    kt = float(np.exp(-0.5 * dt * dt)) if nt > 0 else 1.0
+    sim = float(kw * ks * kt)
+    return {
+        "similarity": sim if passed else 0.0,
+        "raw_similarity": sim,
+        "passed": bool(passed),
+        "reason": reason,
+        "workload_similarity": kw,
+        "state_similarity": ks,
+        "trend_similarity": kt,
+        "workload_distance": dw,
+        "state_distance": ds,
+        "trend_distance": dt_base,
+        "rate_distance": dt,
+        "rate_gain": float(cfg["rate_gain"]),
+        "rate_power": float(cfg["rate_power"]),
+        "current": cur,
+        "record": ref,
+    }
+
+
+def _cbo_phase_counts_string(records):
+    counts = {}
+    for rec in list(records or []):
+        pid = rec.get("dynamic_phase_id", None) if isinstance(rec, dict) else None
+        if pid is None:
+            pid, _ = _cbo_dynamic_phase_for_iter(rec.get("bo_iter", None) if isinstance(rec, dict) else None)
+        key = str(pid) if pid is not None else "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return ";".join(f"P{k}:{v}" for k, v in sorted(counts.items(), key=lambda kv: kv[0]))
+
+
 def _cbo_record_identity(agent, rec):
     try:
         theta = _cbo_theta_norm(agent, rec.get("theta", []))
@@ -3691,7 +4068,7 @@ def _refactor_collect_samples(self, state=None):
                   selected_macro_sims=None, selected_from_macro_pool_count=None, selected_outside_macro_pool_count=0,
                   macro_gate_fallback_used=False, macro_gate_fallback_reason="",
                   context_selection_source_pool="all_records", elite_selection_source_pool="all_records",
-                  tr_anchor_source_pool="all_records"):
+                  tr_anchor_source_pool="all_records", state_kernel_debug=None):
         sims = list(sims or [])
         macro_sims = list(macro_sims or [])
         macro_pool_sims = list(macro_pool_sims or [])
@@ -3702,6 +4079,7 @@ def _refactor_collect_samples(self, state=None):
             selected_from_macro_pool_count = int(macro_count)
         warm_count = sum(1 for rec in list(pool or []) if _cbo_is_warm_record(rec))
         local_count = int(len(list(pool or [])) - warm_count)
+        extra_state_kernel_debug = dict(state_kernel_debug or {})
         self.last_history_debug = {
             "history_select_mode": select_mode,
             "effective_history_mode": str(getattr(self, "history_mode", _cfg_history_mode("all"))),
@@ -3750,9 +4128,12 @@ def _refactor_collect_samples(self, state=None):
             "elite_best_mean_cost": elite.get("mean_cost"),
             "elite_best_std_cost": elite.get("std_cost"),
         }
+        self.last_history_debug.update(extra_state_kernel_debug)
 
     mode = str(getattr(self, "history_mode", _cfg_history_mode("all")) or "all").strip().lower()
-    if mode in {"all", "legacy", "none"}:
+    macro_mode = str(getattr(self, "cbo_macro_gate_mode", _cfg_cbo_str("CBO_MACRO_GATE_MODE", "off")) or "off").strip().lower()
+    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel"} or macro_mode != "off"
+    if mode in {"all", "legacy", "none"} and not selector_requires_pool:
         set_debug(records)
         return records
 
@@ -3760,7 +4141,151 @@ def _refactor_collect_samples(self, state=None):
     min_keep = max(2, int(getattr(self, "confidence_min_samples", _cfg_confidence_min_samples())))
     min_conf = float(getattr(self, "confidence_min", _cfg_confidence_min()))
 
-    macro_mode = str(getattr(self, "cbo_macro_gate_mode", _cfg_cbo_str("CBO_MACRO_GATE_MODE", "off")) or "off").strip().lower()
+    if select_mode == "state_gated_kernel":
+        all_records = _cbo_all_records(self)
+        cfg_sk = _cbo_state_kernel_cfg(self)
+        recent_keep = int(cfg_sk["recent_keep"])
+        recent = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_keep:]] if recent_keep > 0 else []
+        current_feat = _cbo_state_kernel_features(self, context=context, all_records=all_records, current=True)
+        scored = []
+        reject_reasons = {}
+        for rec in all_records:
+            info = _cbo_state_kernel_similarity(self, context, rec, all_records=all_records, current_feat=current_feat)
+            rec2 = dict(rec)
+            rec2["_cbo_state_kernel_similarity"] = float(info.get("similarity", 0.0))
+            rec2["_cbo_state_kernel_raw_similarity"] = float(info.get("raw_similarity", 0.0))
+            rec2["_cbo_state_kernel_reason"] = str(info.get("reason", ""))
+            rec2["_cbo_state_workload_similarity"] = float(info.get("workload_similarity", np.nan))
+            rec2["_cbo_state_state_similarity"] = float(info.get("state_similarity", np.nan))
+            rec2["_cbo_state_trend_similarity"] = float(info.get("trend_similarity", np.nan))
+            rec2["_cbo_state_workload_distance"] = float(info.get("workload_distance", np.nan))
+            rec2["_cbo_state_state_distance"] = float(info.get("state_distance", np.nan))
+            rec2["_cbo_state_trend_distance"] = float(info.get("trend_distance", np.nan))
+            rec2["_cbo_state_rate_distance"] = float(info.get("rate_distance", np.nan))
+            if bool(info.get("passed", False)) and float(info.get("similarity", 0.0)) >= float(cfg_sk["threshold"]):
+                scored.append((float(info.get("similarity", 0.0)), rec2))
+            else:
+                reason = str(info.get("reason", "filtered"))
+                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+        scored.sort(key=lambda x: (x[0], int(x[1].get("bo_iter", -1) or -1)), reverse=True)
+        kernel_records = [r for _, r in scored[:int(cfg_sk["topk"] )]]
+        fallback_records = []
+        fallback_used = False
+        fallback_reason = ""
+        if len(kernel_records) < int(cfg_sk["min_rows"]):
+            fallback_used = True
+            fallback_reason = f"passed_rows_{len(kernel_records)}_lt_min_{int(cfg_sk['min_rows'])}"
+            fb = str(cfg_sk.get("fallback", "recent_context")).lower()
+            if fb == "all":
+                fallback_records = list(all_records[-max(int(cfg_sk["min_rows"]), recent_window):])
+            elif fb == "recent":
+                fallback_records = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-max(int(cfg_sk["min_rows"]), recent_window):]]
+            else:
+                context_scored = [(_cbo_context_similarity(self, context, r), r) for r in all_records]
+                context_scored.sort(key=lambda x: (x[0], int(x[1].get("bo_iter", -1) or -1)), reverse=True)
+                fallback_records = [r for _, r in context_scored[:max(int(cfg_sk["min_rows"]), int(cfg_sk["topk"]))]]
+        merged = []
+        for priority, block in [(0, recent), (1, kernel_records), (2, fallback_records)]:
+            for rec in block:
+                rec = dict(rec)
+                rec["_cbo_select_priority"] = priority
+                rec["_cbo_context_similarity"] = _cbo_context_similarity(self, context, rec)
+                rec["_cbo_state_kernel_similarity"] = float(rec.get("_cbo_state_kernel_similarity", np.nan))
+                merged.append(rec)
+        dedup = {}
+        eps = max(1e-9, float(getattr(self, "cbo_theta_merge_eps", _cfg_cbo_float("CBO_THETA_MERGE_EPS", 0.05))))
+        for rec in merged:
+            tn = _cbo_theta_norm(self, rec.get("theta", []))
+            cn = np.asarray(self._normalize_context(rec.get("context")), dtype=float) if rec.get("context") is not None and getattr(self, "use_context", False) else np.zeros(0)
+            key = tuple(np.round(np.concatenate([tn / eps, cn / max(eps, 1e-9)]), 0).astype(int).tolist())
+            old = dedup.get(key)
+            new_score = (int(rec.get("_cbo_select_priority", 9)), -float(np.nan_to_num(rec.get("_cbo_state_kernel_similarity", 0.0), nan=0.0)), -float(rec.get("_cbo_context_similarity", 0.0)), -int(rec.get("bo_iter", -1) or -1))
+            if old is None:
+                dedup[key] = rec
+            else:
+                old_score = (int(old.get("_cbo_select_priority", 9)), -float(np.nan_to_num(old.get("_cbo_state_kernel_similarity", 0.0), nan=0.0)), -float(old.get("_cbo_context_similarity", 0.0)), -int(old.get("bo_iter", -1) or -1))
+                if new_score < old_score:
+                    dedup[key] = rec
+        pool = list(dedup.values())
+        max_train = max(2, int(cfg_sk["recent_keep"]) + int(cfg_sk["topk"]) + (int(cfg_sk["min_rows"]) if fallback_used else 0))
+        pool.sort(key=lambda r: (int(r.get("_cbo_select_priority", 9)), -float(np.nan_to_num(r.get("_cbo_state_kernel_similarity", 0.0), nan=0.0)), -float(r.get("_cbo_context_similarity", 0.0)), -int(r.get("bo_iter", -1) or -1)))
+        pool = pool[:max_train]
+        sims = [float(s) for s, _ in scored]
+        selected_sims = []
+        for r in pool:
+            try:
+                val = float(r.get("_cbo_state_kernel_similarity", np.nan))
+                if np.isfinite(val):
+                    selected_sims.append(val)
+            except Exception:
+                pass
+        rate_dists = []
+        for _, r in scored:
+            try:
+                val = float(r.get("_cbo_state_rate_distance", np.nan))
+                if np.isfinite(val):
+                    rate_dists.append(val)
+            except Exception:
+                pass
+        selected_rate_dists = []
+        for r in pool:
+            try:
+                val = float(r.get("_cbo_state_rate_distance", np.nan))
+                if np.isfinite(val):
+                    selected_rate_dists.append(val)
+            except Exception:
+                pass
+        reason_str = ";".join(f"{k}:{v}" for k, v in sorted(reject_reasons.items()))
+        state_debug = {
+            "state_kernel_enabled": True,
+            "state_kernel_topk": int(cfg_sk["topk"]),
+            "state_kernel_min_rows": int(cfg_sk["min_rows"]),
+            "state_kernel_recent_keep": int(cfg_sk["recent_keep"]),
+            "state_kernel_threshold": float(cfg_sk["threshold"]),
+            "state_kernel_raw_records": int(len(all_records)),
+            "state_kernel_passed_count": int(len(scored)),
+            "state_kernel_rejected_count": int(max(0, len(all_records) - len(scored))),
+            "state_kernel_reject_reason_counts": reason_str,
+            "state_kernel_selected_count": int(len(kernel_records)),
+            "state_kernel_fallback_used": bool(fallback_used),
+            "state_kernel_fallback_reason": str(fallback_reason),
+            "state_kernel_similarity_max": float(max(sims)) if sims else np.nan,
+            "state_kernel_similarity_mean": float(np.mean(sims)) if sims else np.nan,
+            "state_kernel_similarity_p50": float(np.percentile(sims, 50)) if sims else np.nan,
+            "state_kernel_selected_similarity_mean": float(np.nanmean(selected_sims)) if selected_sims else np.nan,
+            "state_kernel_selected_similarity_min": float(np.nanmin(selected_sims)) if selected_sims else np.nan,
+            "state_kernel_selected_similarity_max": float(np.nanmax(selected_sims)) if selected_sims else np.nan,
+            "state_kernel_current_total_norm": current_feat["raw"].get("total_norm"),
+            "state_kernel_current_rt_ratio": current_feat["raw"].get("rt_ratio"),
+            "state_kernel_current_batch_ratio": current_feat["raw"].get("batch_ratio"),
+            "state_kernel_current_backlog_norm": current_feat["raw"].get("backlog_norm"),
+            "state_kernel_current_unfinished_rate": current_feat["raw"].get("unfinished_rate"),
+            "state_kernel_current_backlog_trend": current_feat["raw"].get("backlog_trend"),
+            "state_kernel_current_unfinished_trend": current_feat["raw"].get("unfinished_rate_trend"),
+            "state_kernel_current_cost_trend": current_feat["raw"].get("recent_cost_trend"),
+            "state_kernel_current_delay_trend": current_feat["raw"].get("recent_delay_trend"),
+            "state_kernel_rate_gain": float(cfg_sk["rate_gain"]),
+            "state_kernel_rate_power": float(cfg_sk["rate_power"]),
+            "state_kernel_max_rate_dist": float(cfg_sk["max_rate_dist"]),
+            "state_kernel_rate_sign_veto": bool(cfg_sk.get("rate_sign_veto", True)),
+            "state_kernel_rate_distance_mean": float(np.nanmean(rate_dists)) if rate_dists else np.nan,
+            "state_kernel_rate_distance_p50": float(np.nanpercentile(rate_dists, 50)) if rate_dists else np.nan,
+            "state_kernel_rate_distance_max": float(np.nanmax(rate_dists)) if rate_dists else np.nan,
+            "state_kernel_selected_rate_distance_mean": float(np.nanmean(selected_rate_dists)) if selected_rate_dists else np.nan,
+            "state_kernel_selected_phase_counts": _cbo_phase_counts_string(pool),
+        }
+        set_debug(
+            pool,
+            recent_count=len(recent),
+            context_count=len(kernel_records),
+            sims=sims,
+            context_selection_source_pool="state_gated_kernel",
+            elite_selection_source_pool="state_gated_kernel",
+            tr_anchor_source_pool="state_gated_kernel",
+            state_kernel_debug=state_debug,
+        )
+        return list(pool)
+
     if select_mode in {"recent_context", "recent_context_elite", "hybrid"} or macro_mode != "off":
         recent = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_window:]]
         all_records = _cbo_all_records(self)

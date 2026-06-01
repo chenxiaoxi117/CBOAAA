@@ -691,6 +691,42 @@ class ExperimentConfig:
     DEFAULT_CBO_ROBUST_STD_WEIGHT = 0.5
     DEFAULT_CBO_THETA_MERGE_EPS = 0.05
     DEFAULT_CBO_CONTEXT_SIM_THRESHOLD = 0.0
+    # State-gated kernel history selection. Defaults are inert unless
+    # --cbo-history-select-mode state_gated_kernel or
+    # --dynamic-history-mode state_gated_kernel is explicitly used.
+    DEFAULT_CBO_STATE_KERNEL_TOPK = 100
+    DEFAULT_CBO_STATE_KERNEL_MIN_ROWS = 20
+    DEFAULT_CBO_STATE_KERNEL_RECENT_KEEP = 20
+    DEFAULT_CBO_STATE_KERNEL_THRESHOLD = 0.05
+    DEFAULT_CBO_STATE_KERNEL_FALLBACK = "recent_context"  # recent / recent_context / all
+    DEFAULT_CBO_STATE_KERNEL_MAX_WORKLOAD_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_STATE_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_TREND_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_UNFINISHED_DIFF = 0.30
+    DEFAULT_CBO_STATE_KERNEL_MAX_BACKLOG_DIFF = 0.50
+    DEFAULT_CBO_STATE_KERNEL_TREND_SIGN_VETO = True
+    DEFAULT_CBO_STATE_KERNEL_TREND_SIGN_MIN = 0.02
+    DEFAULT_CBO_STATE_KERNEL_BACKLOG_REF = 500.0
+    DEFAULT_CBO_STATE_KERNEL_COST_REF = 20000.0
+    DEFAULT_CBO_STATE_KERNEL_DELAY_REF = 30.0
+    DEFAULT_CBO_STATE_KERNEL_LS_WORKLOAD_TOTAL = 0.35
+    DEFAULT_CBO_STATE_KERNEL_LS_WORKLOAD_RT = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_WORKLOAD_BATCH = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_BACKLOG = 0.25
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_UNFINISHED = 0.15
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_AVG_UTIL = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_MAX_UTIL = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_BACKLOG = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_UNFINISHED = 0.10
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_COST = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_DELAY = 0.20
+    # Rate-aware state kernel.  Defaults preserve the original distance
+    # shape (gain=1, power=1).  Increase gain/power from CLI to enlarge
+    # internal trend/rate differences without changing workload matching.
+    DEFAULT_CBO_STATE_KERNEL_RATE_GAIN = 1.0
+    DEFAULT_CBO_STATE_KERNEL_RATE_POWER = 1.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_RATE_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_RATE_SIGN_VETO = True
     DEFAULT_CBO_TR_MODE = "off"
     DEFAULT_CBO_TR_ANCHOR_MODE = "posterior_mean"
     DEFAULT_CBO_ROBUST_INCUMBENT_MODE = "off"
@@ -773,7 +809,7 @@ class ExperimentConfig:
     # BO/CBO agents keep their local history across phase switches.
     # ===========================================================
     DEFAULT_DYNAMIC_SCHEDULE = ""
-    DEFAULT_DYNAMIC_HISTORY_MODE = "all_history"  # all_history / recent_window / context_topk (first version records only)
+    DEFAULT_DYNAMIC_HISTORY_MODE = "all_history"  # all_history / recent_window / context_topk / state_gated_kernel
     DEFAULT_DYNAMIC_HISTORY_WINDOW = 200
     DEFAULT_DYNAMIC_CONTEXT_TOPK = 100
     DYNAMIC_SCENARIO_ACTIVE = False
