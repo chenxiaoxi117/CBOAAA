@@ -145,9 +145,10 @@ def build_topology_matrix(node_count):
             # 目标节点接入差异：近实时/低功耗边缘稍近，高性能/云节点稍远。
             role = str(dst_cfg.get("role", "normal_edge"))
             access = float(local_access.get(role, 0.0))
+            node_prop = float(src_cfg.get("propagation_delay", 0.0)) + float(dst_cfg.get("propagation_delay", 0.0))
             if i == j:
                 base = min(base, 0.12)
-            matrix[i][j] = max(0.01, base + access)
+            matrix[i][j] = max(0.01, base + access + node_prop)
     return matrix
 
 
@@ -165,36 +166,174 @@ def build_bandwidth_matrix(node_count):
         src_site = _get_node_site_from_cfg(CFG.NODES_CFG[i], default_site=i // 2)
         for j in range(node_count):
             dst_site = _get_node_site_from_cfg(CFG.NODES_CFG[j], default_site=j // 2)
-            matrix[i][j] = max(1e-6, float(site_bw[src_site][dst_site]))
+            src_cfg = CFG.NODES_CFG[i]
+            dst_cfg = CFG.NODES_CFG[j]
+            link_bw = float(site_bw[src_site][dst_site])
+            src_uplink = float(src_cfg.get("uplink_bandwidth", link_bw))
+            dst_downlink = float(dst_cfg.get("downlink_bandwidth", link_bw))
+            matrix[i][j] = max(1e-6, min(link_bw, src_uplink, dst_downlink))
     return matrix
 
 
-def get_effective_speed(node_cfg, task_type):
-    """返回节点对某类任务的有效速度。默认关闭任务类型适配：三类任务都只使用节点基础 speed。"""
-    base_speed = float(node_cfg.get("speed", 1.0)) * 1e9
+def get_node_capacity_slots(node_cfg):
+    """Return abstract concurrent capacity slots, not physical CPU cores."""
+    return int(node_cfg.get("capacity_slots", node_cfg.get("cpu", node_cfg.get("num_cores", 1))))
+
+
+def get_node_task_affinity_factor(node_cfg, task_type=None):
+    """Return A_j,k, the environment-defined task-node affinity factor.
+
+    The preferred field is task_node_affinity_factor. Older experiment files
+    may still contain accel_factor/type_speed_factor; those are compatibility
+    aliases and are not CBO-only mechanisms.
+    """
+    if task_type is None:
+        return 1.0
+    factors = (
+        node_cfg.get("task_node_affinity_factor")
+        or node_cfg.get("task_specific_service_factor")
+        or node_cfg.get("accel_factor")
+        or node_cfg.get("type_speed_factor")
+        or {}
+    )
+    return float(factors.get(task_type, 1.0))
+
+
+def get_node_service_rate(node_cfg, task_type=None):
+    """Return effective service rate in cycles/s.
+
+    service_rate_gips is the preferred field. The legacy speed field is kept
+    only as a compatibility alias and must not be interpreted as CPU GHz.
+    """
+    if "service_rate_gips" in node_cfg:
+        base_rate = float(node_cfg.get("service_rate_gips", 1.0)) * 1e9
+    elif "service_rate_mips" in node_cfg:
+        base_rate = float(node_cfg.get("service_rate_mips", 1000.0)) * 1e6
+    elif "mips_per_core" in node_cfg:
+        cores = max(1.0, float(node_cfg.get("num_cores", get_node_capacity_slots(node_cfg))))
+        base_rate = float(node_cfg.get("mips_per_core", 1000.0)) * cores * 1e6
+    else:
+        base_rate = float(node_cfg.get("speed", 1.0)) * 1e9
+
     if _node_is_cloud(node_cfg):
-        base_speed *= float(getattr(CFG, "CLOUD_SPEED_MULT", 1.0))
+        base_rate *= float(getattr(CFG, "CLOUD_SERVICE_RATE_MULT", getattr(CFG, "CLOUD_SPEED_MULT", 1.0)))
+
     try:
         use_adaptation = bool(getattr(CFG, "USE_TASK_TYPE_ADAPTATION", False))
     except NameError:
         use_adaptation = False
-    if not use_adaptation:
-        return base_speed
-    factors = node_cfg.get("type_speed_factor", {}) or {}
-    return base_speed * float(factors.get(task_type, 1.0))
+    if not use_adaptation or task_type is None:
+        return base_rate
+
+    return base_rate * get_node_task_affinity_factor(node_cfg, task_type)
 
 
-def get_transmission_delay(origin_node_idx, target_node_idx, data_size, include_local=True):
-    """传输时延 = 本地上传固定时延 + 车间/云基础时延 + data_size / 链路带宽。"""
+def get_effective_speed(node_cfg, task_type):
+    """Compatibility wrapper for older scheduler code."""
+    return get_node_service_rate(node_cfg, task_type)
+
+
+def get_node_idle_power(node_cfg):
+    return float(node_cfg.get("idle_power", node_cfg.get("p_idle", 0.0)))
+
+
+def get_node_max_power(node_cfg):
+    return float(node_cfg.get("max_power", node_cfg.get("p_max", get_node_idle_power(node_cfg))))
+
+
+def get_reserved_slots(node_cfg, task_type="RT"):
+    reserved = node_cfg.get("reserved_resource", {}) or {}
+    if isinstance(reserved, (int, float)):
+        return int(max(0.0, float(reserved)))
+    return int(max(0.0, float(reserved.get(task_type, 0.0))))
+
+
+def get_task_upload_size(props):
+    return float(props.get("upload_size", props.get("data", 0.0)))
+
+
+def get_task_download_size(props):
+    return float(props.get("download_size", 0.0))
+
+
+def get_task_total_data_size(props):
+    if "data" in props:
+        return float(props.get("data", 0.0))
+    return get_task_upload_size(props) + get_task_download_size(props)
+
+
+def get_task_required_cores(props):
+    return int(props.get("required_cores", props.get("cpu", 1)))
+
+
+def get_task_memory_demand(props):
+    return float(props.get("memory_demand", props.get("memory_gb", props.get("mem", 0.0))))
+
+
+def get_task_workload_cycles(props):
+    if "workload_cycles" in props:
+        return float(props.get("workload_cycles", 0.0))
+    return float(props.get("dur", 1.0)) * float(getattr(CFG, "TASK_CYCLE_RATE_REFERENCE", 4.5e9))
+
+
+def get_task_duration_reference(props):
+    if "duration_base" in props:
+        return float(props.get("duration_base", 0.0))
+    if "dur" in props:
+        return float(props.get("dur", 0.0))
+    return get_task_workload_cycles(props) / max(float(getattr(CFG, "TASK_CYCLE_RATE_REFERENCE", 4.5e9)), 1e-9)
+
+
+def get_task_deadline_budget(props):
+    return float(props.get("deadline", get_task_duration_reference(props) * float(props.get("deadline_factor", 1.0))))
+
+
+def get_task_delay_sensitivity(props):
+    return float(props.get("delay_sensitivity", 1.0))
+
+
+def build_task_kwargs_from_props(task_type, props, create_time, origin_node_id=-1):
+    cycles = get_task_workload_cycles(props)
+    duration_ref = get_task_duration_reference(props)
+    deadline_budget = get_task_deadline_budget(props)
+    upload = get_task_upload_size(props)
+    download = get_task_download_size(props)
+    return {
+        "create_time": float(create_time),
+        "upload_size": upload,
+        "download_size": download,
+        "workload_cycles": cycles,
+        "required_cores": get_task_required_cores(props),
+        "memory_demand": get_task_memory_demand(props),
+        "deadline": float(create_time) + deadline_budget,
+        "delay_sensitivity": get_task_delay_sensitivity(props),
+        "task_type": task_type,
+        "arrival_time": float(create_time),
+        # Legacy aliases used by older diagnostics/schedulers.
+        "data_size": upload + download,
+        "cpu_req": get_task_required_cores(props),
+        "duration_base": duration_ref,
+        "deadline_factor": deadline_budget / max(duration_ref, 1e-9),
+        "origin_node_id": int(origin_node_id),
+    }
+
+
+def get_transmission_delay(origin_node_idx, target_node_idx, data_size, include_local=True, direction="upload"):
+    """Transmission delay = propagation + data / bandwidth + access delay."""
+    if float(data_size) <= 0.0:
+        return 0.0
     origin_node_idx = int(origin_node_idx) if origin_node_idx is not None and origin_node_idx >= 0 else int(target_node_idx)
     target_node_idx = int(target_node_idx)
     base = float(CFG.TRANS_DELAY_MATRIX[origin_node_idx][target_node_idx])
     bw = float(CFG.TRANS_BW_MATRIX[origin_node_idx][target_node_idx]) if hasattr(CFG, "TRANS_BW_MATRIX") else float(CFG.LINK_BW)
     delay = base + float(data_size) / (bw + 1e-9)
-    if _node_is_cloud(CFG.NODES_CFG[target_node_idx]):
+    if _node_is_cloud(CFG.NODES_CFG[origin_node_idx]) or _node_is_cloud(CFG.NODES_CFG[target_node_idx]):
         delay *= float(getattr(CFG, "CLOUD_DELAY_MULT", 1.0))
     if include_local:
-        delay += float(getattr(CFG, "LOCAL_UPLOAD_DELAY", 0.0))
+        if str(direction).lower() == "download":
+            delay += float(getattr(CFG, "LOCAL_DOWNLOAD_DELAY", 0.0))
+        else:
+            delay += float(getattr(CFG, "LOCAL_UPLOAD_DELAY", 0.0))
     return max(0.0, delay)
 
 
@@ -203,6 +342,8 @@ def get_transmission_energy(origin_node_idx, target_node_idx, data_size):
 
     这是第一版轻量模型，不做链路功率积分；好处是简单、稳定、能体现跨车间/上云更耗能。
     """
+    if float(data_size) <= 0.0:
+        return 0.0
     origin_node_idx = int(origin_node_idx) if origin_node_idx is not None and origin_node_idx >= 0 else int(target_node_idx)
     target_node_idx = int(target_node_idx)
     src_site = _get_node_site_from_cfg(CFG.NODES_CFG[origin_node_idx], default_site=origin_node_idx // 2)
@@ -213,7 +354,7 @@ def get_transmission_energy(origin_node_idx, target_node_idx, data_size):
     else:
         factor = 1.0 + 0.25 * float(CFG.TRANS_DELAY_MATRIX[origin_node_idx][target_node_idx])
     energy = float(getattr(CFG, "P_TRANS", 0.5)) * float(data_size) * factor
-    if _node_is_cloud(CFG.NODES_CFG[target_node_idx]):
+    if _node_is_cloud(CFG.NODES_CFG[origin_node_idx]) or _node_is_cloud(CFG.NODES_CFG[target_node_idx]):
         energy *= float(getattr(CFG, "CLOUD_ENERGY_MULT", 1.0))
     return energy
 
@@ -379,9 +520,14 @@ class ExperimentConfig:
     SCENARIO_WINDOW = 60.0  # 统计情景指标时看的滑动时间窗长度
     SCENARIO_STABLE_K = 3  # 连续多少次判定到相同 state，才认为情景稳定
 
-    # 分段泊松到达率：不同时间段任务到达强度不同，用来制造动态环境
+    # 分段泊松到达率：不同时间段任务到达强度不同，用来制造动态环境。
+    # 主实验不再把“固定 RT/Batch/AI 比例”本身当作动态性证据；
+    # 动态性来自到达强度、任务比例、链路/资源等随时间变化的阶段。
     LAMBDA_SCHEDULE = [
-        (0.0, 120000.0, 1.0)]
+        (0.0, 40000.0, 1.0),
+        (40000.0, 80000.0, 1.8),
+        (80000.0, 120000.0, 1.2),
+    ]
      #(1000.0, 2000.0, 1.8),
       ##(3000.0, 4000.0, 1.0),
        #(4000.0, 5000.0, 1.8),
@@ -395,15 +541,29 @@ class ExperimentConfig:
     BATCH_POISSON_LAMBDA = 1.5  # 批模式的泊松到达率
     TASK_TYPE_PROBS = {"RT": 0.1, "Batch": 0.40, "AI": 0.50}  # 三类任务的生成概率
 
-    # 三类任务的属性：
-    # data:  数据量
-    # cpu:   所需 CPU 资源单位
-    # dur:   基础执行时长（也决定 cpu_cycles）
-    # deadline_factor: 截止期 = create_time + dur * deadline_factor
+    # Task profile fields follow a MEC-style model:
+    # upload_size / download_size: input and result data sizes
+    # workload_cycles: compute demand in cycles
+    # required_cores: abstract concurrent resource slots needed by the task
+    # deadline: relative SLA budget in seconds; Task.deadline stores absolute time
+    # delay_sensitivity: diagnostic/weighting metadata for task criticality
+    TASK_CYCLE_RATE_REFERENCE = 4.5e9
     TASK_PROPS = {
-        "RT": {"data": 10.0, "cpu": 4, "dur": 3.0, "deadline_factor": 2.0},
-        "Batch": {"data": 80.0, "cpu": 12, "dur": 15.0, "deadline_factor": 20.0},
-        "AI": {"data": 160.0, "cpu": 20, "dur": 20.0, "deadline_factor": 15.0}
+        "RT": {
+            "upload_size": 8.0, "download_size": 2.0,
+            "workload_cycles": 13.5e9, "required_cores": 4, "memory_demand": 2.0,
+            "deadline": 6.0, "delay_sensitivity": 1.0, "task_type": "RT",
+        },
+        "Batch": {
+            "upload_size": 70.0, "download_size": 10.0,
+            "workload_cycles": 67.5e9, "required_cores": 12, "memory_demand": 8.0,
+            "deadline": 300.0, "delay_sensitivity": 0.2, "task_type": "Batch",
+        },
+        "AI": {
+            "upload_size": 150.0, "download_size": 10.0,
+            "workload_cycles": 90.0e9, "required_cores": 20, "memory_demand": 16.0,
+            "deadline": 300.0, "delay_sensitivity": 0.5, "task_type": "AI",
+        },
     }
 
     # 2. 增加延迟的惩罚权重：让 BO 不敢随便降频
@@ -418,43 +578,94 @@ class ExperimentConfig:
     # workshop/site: 0~4 表示五个车间；5 表示厂区云；6 表示区域云。
     # role: 用于生成接入时延修正、功耗策略和后续诊断。
     # 是否启用“任务类型适配”。
-    # False：RT / Batch / AI 都只使用节点基础 speed，避免 AI 加速/RT 加速等人为专用系数。
-    # True：启用 type_speed_factor，让部分节点对特定任务更快，作为异构加速器消融实验。
-    USE_TASK_TYPE_ADAPTATION = False
+    # False: RT / Batch / AI all use the base service_rate_gips.
+    # True: use the shared task_node_affinity_factor matrix as environment
+    # heterogeneity. All baselines and CBO see the same matrix.
+    USE_TASK_TYPE_ADAPTATION = True
 
-    # type_speed_factor: 不同节点对 RT / Batch / AI 的适配差异；例如 AI 加速节点对 AI 更快。
-    # 当前默认 USE_TASK_TYPE_ADAPTATION=False，因此这些系数不会生效；保留字段只是方便后续消融对比。
-    # 注意：这里故意不做成“0号最强、9号最弱”的单调结构，而是让节点在算力、位置、功耗上有交叉优势。
+    # Node fields use abstract service/resource-pool semantics. capacity_slots
+    # are concurrent scheduling slots/VM-pool units, while num_cores is only
+    # descriptive. service_rate_gips is Gcycles/s, not CPU GHz.
+    # task_node_affinity_factor is a shared environment matrix A_j,k, not a
+    # CBO-specific accelerator trick. Use --no-task-adaptation for ablation.
     NODES_CFG = [
-        {"id": 0, "workshop": 0, "role": "rt_edge",     "cpu": 56,  "speed": 3.7, "p_idle": 85,  "p_max": 380,
-         "type_speed_factor": {"RT": 1.30, "Batch": 0.90, "AI": 0.65}},
-        {"id": 1, "workshop": 0, "role": "low_power",   "cpu": 44,  "speed": 2.9, "p_idle": 45,  "p_max": 210,
-         "type_speed_factor": {"RT": 1.00, "Batch": 0.85, "AI": 0.55}},
+        {"id": 0, "node_type": "rt_edge", "workshop": 0, "role": "rt_edge", "num_cores": 16, "capacity_slots": 56,
+         "service_rate_gips": 3.7, "idle_power": 85, "max_power": 380,
+         "memory_gb": 64,
+         "uplink_bandwidth": 120.0, "downlink_bandwidth": 120.0, "propagation_delay": 0.00,
+         "accelerator_type": "rt_reserved_edge", "reserved_resource": {"RT": 8},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.90, "AI": 0.65}},
+        {"id": 1, "node_type": "edge", "workshop": 0, "role": "low_power", "num_cores": 8, "capacity_slots": 44,
+         "service_rate_gips": 2.9, "idle_power": 45, "max_power": 210,
+         "memory_gb": 48,
+         "uplink_bandwidth": 95.0, "downlink_bandwidth": 95.0, "propagation_delay": 0.01,
+         "accelerator_type": "none", "reserved_resource": {"RT": 4},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.85, "AI": 0.55}},
 
-        {"id": 2, "workshop": 1, "role": "efficient",   "cpu": 72,  "speed": 4.4, "p_idle": 115, "p_max": 500,
-         "type_speed_factor": {"RT": 1.00, "Batch": 1.20, "AI": 1.00}},
-        {"id": 3, "workshop": 1, "role": "normal_edge", "cpu": 52,  "speed": 3.4, "p_idle": 70,  "p_max": 320,
-         "type_speed_factor": {"RT": 1.05, "Batch": 1.00, "AI": 0.85}},
+        {"id": 2, "node_type": "fog", "workshop": 1, "role": "efficient", "num_cores": 20, "capacity_slots": 72,
+         "service_rate_gips": 4.4, "idle_power": 115, "max_power": 500,
+         "memory_gb": 96,
+         "uplink_bandwidth": 110.0, "downlink_bandwidth": 110.0, "propagation_delay": 0.02,
+         "accelerator_type": "batch_parallel_cpu", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.20, "AI": 1.00}},
+        {"id": 3, "node_type": "edge", "workshop": 1, "role": "normal_edge", "num_cores": 12, "capacity_slots": 52,
+         "service_rate_gips": 3.4, "idle_power": 70, "max_power": 320,
+         "memory_gb": 64,
+         "uplink_bandwidth": 100.0, "downlink_bandwidth": 100.0, "propagation_delay": 0.02,
+         "accelerator_type": "none", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.00, "AI": 0.85}},
 
-        {"id": 4, "workshop": 2, "role": "ai_accel",    "cpu": 88,  "speed": 5.0, "p_idle": 210, "p_max": 850,
-         "type_speed_factor": {"RT": 0.90, "Batch": 1.00, "AI": 1.85}},
-        {"id": 5, "workshop": 2, "role": "normal_edge", "cpu": 54,  "speed": 3.5, "p_idle": 78,  "p_max": 340,
-         "type_speed_factor": {"RT": 1.00, "Batch": 1.00, "AI": 0.90}},
+        {"id": 4, "node_type": "ai_accel", "workshop": 2, "role": "ai_accel", "num_cores": 24, "capacity_slots": 88,
+         "service_rate_gips": 5.0, "idle_power": 210, "max_power": 850,
+         "memory_gb": 192,
+         "uplink_bandwidth": 90.0, "downlink_bandwidth": 100.0, "propagation_delay": 0.05,
+         "accelerator_type": "gpu_npu_pool", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.00, "AI": 1.85}},
+        {"id": 5, "node_type": "edge", "workshop": 2, "role": "normal_edge", "num_cores": 12, "capacity_slots": 54,
+         "service_rate_gips": 3.5, "idle_power": 78, "max_power": 340,
+         "memory_gb": 64,
+         "uplink_bandwidth": 105.0, "downlink_bandwidth": 105.0, "propagation_delay": 0.02,
+         "accelerator_type": "none", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.00, "AI": 0.90}},
 
-        {"id": 6, "workshop": 3, "role": "low_power",   "cpu": 40,  "speed": 2.6, "p_idle": 32,  "p_max": 165,
-         "type_speed_factor": {"RT": 0.90, "Batch": 0.75, "AI": 0.50}},
-        {"id": 7, "workshop": 3, "role": "batch_node",  "cpu": 68,  "speed": 3.9, "p_idle": 105, "p_max": 430,
-         "type_speed_factor": {"RT": 0.85, "Batch": 1.45, "AI": 0.90}},
+        {"id": 6, "node_type": "edge", "workshop": 3, "role": "low_power", "num_cores": 8, "capacity_slots": 40,
+         "service_rate_gips": 2.6, "idle_power": 32, "max_power": 165,
+         "memory_gb": 40,
+         "uplink_bandwidth": 80.0, "downlink_bandwidth": 80.0, "propagation_delay": 0.01,
+         "accelerator_type": "none", "reserved_resource": {"RT": 3},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.75, "AI": 0.50}},
+        {"id": 7, "node_type": "fog", "workshop": 3, "role": "batch_node", "num_cores": 24, "capacity_slots": 68,
+         "service_rate_gips": 3.9, "idle_power": 105, "max_power": 430,
+         "memory_gb": 96,
+         "uplink_bandwidth": 115.0, "downlink_bandwidth": 115.0, "propagation_delay": 0.03,
+         "accelerator_type": "batch_parallel_cpu", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.45, "AI": 0.90}},
 
-        {"id": 8, "workshop": 4, "role": "high_perf",   "cpu": 96,  "speed": 5.5, "p_idle": 235, "p_max": 940,
-         "type_speed_factor": {"RT": 1.05, "Batch": 1.10, "AI": 1.20}},
-        {"id": 9, "workshop": 4, "role": "backup_low",  "cpu": 36,  "speed": 2.4, "p_idle": 24,  "p_max": 140,
-         "type_speed_factor": {"RT": 0.80, "Batch": 0.65, "AI": 0.45}},
+        {"id": 8, "node_type": "fog", "workshop": 4, "role": "high_perf", "num_cores": 32, "capacity_slots": 96,
+         "service_rate_gips": 5.5, "idle_power": 235, "max_power": 940,
+         "memory_gb": 160,
+         "uplink_bandwidth": 130.0, "downlink_bandwidth": 130.0, "propagation_delay": 0.06,
+         "accelerator_type": "edge_server_pool", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.10, "AI": 1.20}},
+        {"id": 9, "node_type": "edge", "workshop": 4, "role": "backup_low", "num_cores": 8, "capacity_slots": 36,
+         "service_rate_gips": 2.4, "idle_power": 24, "max_power": 140,
+         "memory_gb": 32,
+         "uplink_bandwidth": 75.0, "downlink_bandwidth": 75.0, "propagation_delay": 0.01,
+         "accelerator_type": "none", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.65, "AI": 0.45}},
 
-        {"id": 10, "workshop": 5, "role": "factory_cloud", "is_cloud": True, "cpu": 128, "speed": 6.2, "p_idle": 320, "p_max": 1350,
-         "type_speed_factor": {"RT": 0.95, "Batch": 1.35, "AI": 1.55}},
-        {"id": 11, "workshop": 6, "role": "regional_cloud", "is_cloud": True, "cpu": 192, "speed": 7.0, "p_idle": 480, "p_max": 2100,
-         "type_speed_factor": {"RT": 0.85, "Batch": 1.60, "AI": 2.10}},
+        {"id": 10, "node_type": "cloud", "workshop": 5, "role": "factory_cloud", "is_cloud": True,
+         "num_cores": 64, "capacity_slots": 128, "service_rate_gips": 6.2,
+         "idle_power": 320, "max_power": 1350, "memory_gb": 384,
+         "uplink_bandwidth": 160.0, "downlink_bandwidth": 160.0,
+         "propagation_delay": 0.12, "accelerator_type": "vm_pool_gpu_optional", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.35, "AI": 1.55}},
+        {"id": 11, "node_type": "cloud", "workshop": 6, "role": "regional_cloud", "is_cloud": True,
+         "num_cores": 96, "capacity_slots": 192, "service_rate_gips": 7.0,
+         "idle_power": 480, "max_power": 2100, "memory_gb": 768,
+         "uplink_bandwidth": 220.0, "downlink_bandwidth": 220.0,
+         "propagation_delay": 0.18, "accelerator_type": "regional_vm_gpu_pool", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.60, "AI": 2.10}},
     ]
     # ===========================================================
     # BO 控制向量设置
@@ -506,20 +717,36 @@ class ExperimentConfig:
     SCHEDULER_ALPHA_MAX = 0.97
     SCHEDULER_LE_SCALE = 1.0
     ALPHA_DIRECT_BOUNDS = None
-    ALPHA_DIRECT_RT_BOUNDS = None
-    ALPHA_DIRECT_BATCH_BOUNDS = None
-    ALPHA_DIRECT_AI_BOUNDS = None
+    ALPHA_DIRECT_RT_BOUNDS = (0.70, 0.98)
+    ALPHA_DIRECT_BATCH_BOUNDS = (0.50, 0.90)
+    ALPHA_DIRECT_AI_BOUNDS = (0.50, 0.95)
     ALPHA_DIRECT_FIXED_THETA = None
+    REDUCED7_ENERGY_SCALE_BOUNDS = None
     SCHEDULER_SERVICE_LATENCY_WEIGHT = 1.0
     SCHEDULER_SERVICE_RISK_WEIGHT = 1.0
     SCHEDULER_SERVICE_QUEUE_WEIGHT = 1.0
     SCHEDULER_ENERGY_WEIGHT = 1.0
 
-    # Scheduler score normalization. "legacy" keeps norm_mode=fixed/rolling behavior.
-    SCHEDULER_SCORE_NORM_MODE = "legacy"  # legacy / candidate_median / candidate_iqr / rolling_ema
+    # Scheduler score normalization. candidate_minmax_deadline is the main
+    # per-task candidate-set normalization required by the dynamic scheduler.
+    SCHEDULER_SCORE_NORM_MODE = "candidate_minmax_deadline"  # candidate_minmax_deadline / legacy / candidate_median / candidate_iqr / rolling_ema
     SCHEDULER_NORM_CLIP_MAX = 3.0
     SCHEDULER_NORM_EPS = 1e-6
     SCHEDULER_NORM_EMA_ALPHA = 0.995
+    USE_CLOUD_SCORE_PENALTY = True
+    CLOUD_NODE_PENALTY_WEIGHT = 0.05
+    DIRECT_HEURISTIC_USE_CANDIDATE_NORM = True
+
+    # Keep BO low-dimensional: BO learns one queue weight, then each task
+    # type applies a fixed base sensitivity.
+    QUEUE_BASE_WEIGHTS = {"RT": 1.5, "Batch": 0.5, "AI": 1.0}
+
+    # Risk is primarily handled by deadline feasibility filtering. In normal
+    # feasible choices it acts as a weak tie-breaker; when deadline filtering
+    # falls back to a violation candidate, the full risk penalty is restored.
+    SCHEDULER_RISK_SCORE_MODE = "fallback_tiebreak"  # legacy_main / fallback_tiebreak / off
+    SCHEDULER_RISK_TIEBREAKER_SCALE = 0.10
+    SCHEDULER_RISK_FALLBACK_SCALE = 1.00
 
     RISK_SCALE_DEFAULT = 1.0
     USE_BO_RISK_SCALE = True
@@ -545,7 +772,7 @@ class ExperimentConfig:
     RISK_CLIP_MAX = 3.0  # soft risk 的截断上限，避免 risk 压过所有其他项
     RISK_MARGIN_FACTOR = {"RT": 1.0, "Batch": 0.3, "AI": 0.3}  # 多接近 deadline 才开始产生 pressure
 
-    K_CPU = 1e-28  # 计算能耗系数，e_comp = K_CPU * speed^2 * cycles
+    K_CPU = 1e-28  # Legacy coefficient kept for compatibility; main energy uses power-time integration.
     P_TRANS = 0.5  # 单位数据传输能耗系数
     BETA_INITIAL = 3.0  # Boltzmann 选择温度的反比参数；越大越偏向低分节点
     BETA_TRAINABLE = False  # 是否在线调整 beta；当前默认关闭
@@ -592,6 +819,7 @@ class ExperimentConfig:
                          "factory_cloud": 0.20, "regional_cloud": 0.35}
     LINK_BW = 50.0  # 兼容旧逻辑的默认带宽；新模型实际使用 TRANS_BW_MATRIX
     LOCAL_UPLOAD_DELAY = 0.20  # 本地接入固定附加时延
+    LOCAL_DOWNLOAD_DELAY = 0.05  # Result-return access delay after remote execution
     # ===========================================================
     # Trade-off 场景倍率：用于把“云不是永远最优”的冲突显式化。
     # 1.0 表示保持原始设定；>1 表示上云传输更慢/更耗能；<1 表示云算力被削弱。
@@ -599,7 +827,8 @@ class ExperimentConfig:
     # ===========================================================
     CLOUD_DELAY_MULT = 1.0
     CLOUD_ENERGY_MULT = 1.0
-    CLOUD_SPEED_MULT = 1.0
+    CLOUD_SPEED_MULT = 1.0  # Compatibility alias for CLOUD_SERVICE_RATE_MULT.
+    CLOUD_SERVICE_RATE_MULT = 1.0
     USE_LINK_QUEUE = False  # 第一版默认不做链路占用；如需链路串行排队，可改 True
     TRANS_DELAY_MATRIX = []  # 节点对之间的基础拓扑时延矩阵，后面会自动生成
     TRANS_BW_MATRIX = []  # 节点对之间的带宽矩阵，后面会自动生成
@@ -653,13 +882,20 @@ class ExperimentConfig:
     DEADLINE_WEIGHT = 2.0  # 默认违约风险权重（若任务类型未单独指定）
     COMPLETE_PENALTY = 2.0  # 预留参数，当前主 cost 未直接使用
     VIO_PENALTY = 3.0  # 预留参数，当前主 cost 未直接使用
-    SLA_PENALTY_WEIGHT = 1500.0  # 违反 SLA 的惩罚强度
+    SLA_PENALTY_WEIGHT = 1500.0  # Legacy/diagnostic SLA penalty; window cost now uses RT violation excess.
     EARLY_BONUS_WEIGHT = 200.0  # 提前完成的奖励强度
     USE_EARLY_BONUS = False  # 主实验先关闭提前奖励，避免长 deadline 任务主导 reward
     EARLY_BONUS_CAP = 5.0  # 若开启提前奖励，只奖励有限提前量，避免 reward 被 slack 无限放大
-    LATE_PENALTY_WEIGHT = 300.0  # 超期完成的惩罚强度
-    BACKLOG_WEIGHT = 200.0  # 系统积压任务数的惩罚强度
-    ZERO_COMPLETION_PENALTY = 5000.0  # 本窗口有到达但一个都没完成时的重罚
+    LATE_PENALTY_WEIGHT = 300.0  # Legacy/diagnostic lateness penalty; not part of the main window cost.
+    BACKLOG_WEIGHT = 200.0  # Legacy raw backlog weight; main window cost uses backlog growth rate instead.
+    ZERO_COMPLETION_PENALTY = 5000.0  # Kept as diagnostic; unfinished rate now covers no-completion windows.
+    WINDOW_DELAY_WEIGHT = 1.0
+    WINDOW_ENERGY_WEIGHT = 1.0
+    WINDOW_RT_VIOLATION_WEIGHT = 4.0
+    WINDOW_UNFINISHED_WEIGHT = 6.0
+    WINDOW_BACKLOG_GROWTH_WEIGHT = 2.0
+    WINDOW_RT_VIOLATION_EPS = 0.02
+    WINDOW_ENERGY_SCALE = 1000.0
 
     # ===========================================================
     # BO 反馈模式
@@ -672,6 +908,25 @@ class ExperimentConfig:
     COHORT_UNFINISHED_PENALTY = 1000.0
     COHORT_PENDING_AREA_WEIGHT = 5.0
     COHORT_FORCE_FINALIZE_AT_RUN_END = True
+    CBO_REFERENCE_MODE = "calibrate"
+    CBO_REFERENCE_CALIBRATION_ROUNDS = 30
+    CBO_REFERENCE_MIN_ROUNDS = 5
+    CBO_REFERENCE_STAT = "median"
+    CBO_REFERENCE_TRIM_PCT = 0.1
+    CBO_REFERENCE_FREEZE_AFTER_CALIBRATION = True
+    CBO_REFERENCE_FILE = ""
+    CBO_REFERENCE_OUTPUT_FILE = ""
+    CBO_OBJECTIVE_MODE = "normalized_tradeoff"
+    SCENARIO_NORMALIZATION_REFERENCE = None
+    SCENARIO_NORMALIZATION_REFERENCE_CACHE = {}
+    PHASE_REFERENCE_SCOPE = "significant_external"
+    PHASE_REFERENCE_SWITCH_MODE = "dynamic_schedule"
+    PHASE_LAMBDA_REL_THRESHOLD = 0.30
+    PHASE_TASK_MIX_L1_THRESHOLD = 0.25
+    PHASE_DEADLINE_PRESSURE_REL_THRESHOLD = 0.20
+    PHASE_RESOURCE_PERTURBATION_ID = "normal"
+    PHASE_LINK_PROFILE_ID = "normal"
+    PHASE_CALIBRATION_WINDOW_LABEL = "warm_up"
 
     HARD_DEADLINE = False  # 预留开关；当前不再默认硬筛选 RT 可行节点
 

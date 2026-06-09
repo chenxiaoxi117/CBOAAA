@@ -61,6 +61,32 @@ def _first_present(*values, default=None):
     return default
 
 
+def _theta_feature_value(theta_full, feature_names, name, default=None):
+    if not isinstance(theta_full, (list, tuple, np.ndarray)):
+        return default
+    try:
+        names = list(feature_names or getattr(CFG, "FEATURE_NAMES", []))
+        idx = names.index(name)
+        if idx < len(theta_full):
+            return float(theta_full[idx])
+    except Exception:
+        pass
+    return default
+
+
+def _global_energy_scale_value(w_rt_energy, w_batch_energy, w_ai_energy, default=None):
+    vals = [w_rt_energy, w_batch_energy, w_ai_energy]
+    if any(_is_missing_value(v) for v in vals):
+        return default
+    try:
+        vals = [float(v) for v in vals]
+        if max(vals) - min(vals) <= 1e-9:
+            return vals[0]
+    except Exception:
+        pass
+    return default
+
+
 def group_log_to_dataframe(log, group_key, group_label):
     n = len(log.get("time", []))
     alphas = log.get("alpha", [])
@@ -109,6 +135,49 @@ def group_log_to_dataframe(log, group_key, group_label):
             "Alpha_RT", "Alpha_Batch", "Alpha_AI", "W_Queue", "W_Risk_Scale", "Cloud_Gate"
         ]))
         theta_full_feature_names = _log_get_safe(log, "theta_full_feature_names", i, list(getattr(CFG, "FEATURE_NAMES", [])))
+        w_rt_latency = _first_present(
+            _log_get_safe(log, "W_RT_Latency_last", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_RT_Latency"),
+        )
+        w_batch_latency = _first_present(
+            _log_get_safe(log, "W_Batch_Latency_last", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_Batch_Latency"),
+        )
+        w_ai_latency = _first_present(
+            _log_get_safe(log, "W_AI_Latency_last", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_AI_Latency"),
+        )
+        w_queue_value = _first_present(
+            _log_get_safe(log, "W_Queue_last", i, None),
+            _log_get_safe(log, "w_queue", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_Queue"),
+        )
+        w_risk_scale_value = _first_present(
+            _log_get_safe(log, "W_Risk_Scale_last", i, None),
+            _log_get_safe(log, "w_risk_scale", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_Risk_Scale"),
+        )
+        cloud_gate_value = _first_present(
+            _log_get_safe(log, "Cloud_Gate_last", i, None),
+            _log_get_safe(log, "cloud_gate", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "Cloud_Gate"),
+        )
+        w_rt_energy_last = _first_present(
+            _log_get_safe(log, "W_RT_Energy_last", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_RT_Energy"),
+        )
+        w_batch_energy_last = _first_present(
+            _log_get_safe(log, "W_Batch_Energy_last", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_Batch_Energy"),
+        )
+        w_ai_energy_last = _first_present(
+            _log_get_safe(log, "W_AI_Energy_last", i, None),
+            _theta_feature_value(theta_full_deployed, theta_full_feature_names, "W_AI_Energy"),
+        )
+        w_energy_scale_last = _first_present(
+            _log_get_safe(log, "W_Energy_Scale_last", i, None),
+            _global_energy_scale_value(w_rt_energy_last, w_batch_energy_last, w_ai_energy_last),
+        )
         macro_gate_mode_row = _log_get_non_nan(log, "cbo_macro_gate_mode", i, str(getattr(CFG, "CBO_MACRO_GATE_MODE", "off")))
         default_source_pool = "macro_pool" if str(macro_gate_mode_row).strip().lower() == "hierarchical" else None
         actual_anchor_reason_row = _log_get_ffill(log, "actual_tr_anchor_reason", i, None)
@@ -474,14 +543,25 @@ def group_log_to_dataframe(log, group_key, group_label):
             "cbo_reference_status": _log_get_safe(log, "cbo_reference_status", i, None),
             "cbo_reference_round_count": _log_get_safe(log, "cbo_reference_round_count", i, None),
             "cbo_reference_frozen": _log_get_safe(log, "cbo_reference_frozen", i, None),
+            "phase_id": _log_get_safe(log, "phase_id", i, None),
+            "phase_name": _log_get_safe(log, "phase_name", i, None),
+            "phase_signature": _log_get_safe(log, "phase_signature", i, None),
+            "active_reference_id": _log_get_safe(log, "active_reference_id", i, None),
+            "reference_source": _log_get_safe(log, "reference_source", i, None),
+            "is_calibration_window": _log_get_safe(log, "is_calibration_window", i, None),
+            "calibration_window_label": _log_get_safe(log, "calibration_window_label", i, None),
+            "phase_reference_cache_status": _log_get_safe(log, "phase_reference_cache_status", i, None),
             "delay_ref": _log_get_safe(log, "delay_ref", i, None),
             "energy_per_arrival_ref": _log_get_safe(log, "energy_per_arrival_ref", i, None),
+            "energy_norm_ref": _log_get_safe(log, "energy_norm_ref", i, None),
             "unfinished_rate_ref": _log_get_safe(log, "unfinished_rate_ref", i, None),
+            "rt_violation_rate_ref": _log_get_safe(log, "rt_violation_rate_ref", i, None),
             "success_rate_ref": _log_get_safe(log, "success_rate_ref", i, None),
             "eval_cost_ref": _log_get_safe(log, "eval_cost_ref", i, None),
             "delay_norm": _log_get_safe(log, "delay_norm", i, None),
             "energy_norm": _log_get_safe(log, "energy_norm", i, None),
             "unfinished_norm": _log_get_safe(log, "unfinished_norm", i, None),
+            "rt_violation_norm": _log_get_safe(log, "rt_violation_norm", i, None),
             "eval_cost_norm": _log_get_safe(log, "eval_cost_norm", i, None),
             "success_shortfall": _log_get_safe(log, "success_shortfall", i, None),
             "success_shortfall_norm": _log_get_safe(log, "success_shortfall_norm", i, None),
@@ -496,7 +576,40 @@ def group_log_to_dataframe(log, group_key, group_label):
             "scheduler_le_scale": _log_get_safe(log, "scheduler_le_scale", i, None),
             "scheduler_alpha_last": _log_get_safe(log, "scheduler_alpha_last", i, None),
             "scheduler_alpha_mean": _log_get_safe(log, "scheduler_alpha_mean", i, None),
+            "alpha_rt": _log_get_safe(log, "alpha_rt", i, None),
+            "alpha_batch": _log_get_safe(log, "alpha_batch", i, None),
+            "alpha_ai": _log_get_safe(log, "alpha_ai", i, None),
+            "w_queue": _log_get_safe(log, "w_queue", i, None),
+            "w_queue_effective": _log_get_safe(log, "w_queue_effective", i, None),
+            "w_risk_scale": _log_get_safe(log, "w_risk_scale", i, None),
+            "cloud_gate": _log_get_safe(log, "cloud_gate", i, None),
+            "W_RT_Latency": w_rt_latency,
+            "W_Batch_Latency": w_batch_latency,
+            "W_AI_Latency": w_ai_latency,
+            "W_Queue": w_queue_value,
+            "W_Risk_Scale": w_risk_scale_value,
+            "Cloud_Gate": cloud_gate_value,
+            "W_Energy_Scale": w_energy_scale_last,
+            "W_RT_Energy": w_rt_energy_last,
+            "W_Batch_Energy": w_batch_energy_last,
+            "W_AI_Energy": w_ai_energy_last,
+            "W_RT_Latency_last": w_rt_latency,
+            "W_Batch_Latency_last": w_batch_latency,
+            "W_AI_Latency_last": w_ai_latency,
+            "W_Queue_last": w_queue_value,
+            "W_Risk_Scale_last": w_risk_scale_value,
+            "Cloud_Gate_last": cloud_gate_value,
+            "W_Energy_Scale_last": w_energy_scale_last,
+            "W_RT_Energy_last": w_rt_energy_last,
+            "W_Batch_Energy_last": w_batch_energy_last,
+            "W_AI_Energy_last": w_ai_energy_last,
             "selected_latency_component_last": _log_get_safe(log, "selected_latency_component_last", i, None),
+            "latency_contribution_last": _log_get_safe(log, "latency_contribution_last", i, None),
+            "energy_contribution_last": _log_get_safe(log, "energy_contribution_last", i, None),
+            "service_contribution_last": _log_get_safe(log, "service_contribution_last", i, None),
+            "risk_contribution_last": _log_get_safe(log, "risk_contribution_last", i, None),
+            "queue_contribution_last": _log_get_safe(log, "queue_contribution_last", i, None),
+            "cloud_contribution_last": _log_get_safe(log, "cloud_contribution_last", i, None),
             "selected_energy_component_last": _log_get_safe(log, "selected_energy_component_last", i, None),
             "selected_risk_penalty_last": _log_get_safe(log, "selected_risk_penalty_last", i, None),
             "selected_queue_penalty_last": _log_get_safe(log, "selected_queue_penalty_last", i, None),
@@ -509,6 +622,10 @@ def group_log_to_dataframe(log, group_key, group_label):
             "selected_norm_risk_last": _log_get_safe(log, "selected_norm_risk_last", i, None),
             "selected_norm_queue_last": _log_get_safe(log, "selected_norm_queue_last", i, None),
             "selected_score_last": _log_get_safe(log, "selected_score_last", i, None),
+            "deadline_filter_reject_ratio": _log_get_safe(log, "deadline_filter_reject_ratio", i, None),
+            "fallback_risk_used_ratio": _log_get_safe(log, "fallback_risk_used_ratio", i, None),
+            "cloud_candidate_ratio": _log_get_safe(log, "cloud_candidate_ratio", i, None),
+            "cloud_selected_ratio": _log_get_safe(log, "cloud_selected_ratio", i, None),
             "scheduler_score_min_last": _log_get_safe(log, "scheduler_score_min_last", i, None),
             "scheduler_score_max_last": _log_get_safe(log, "scheduler_score_max_last", i, None),
             "scheduler_score_gap_best_2nd_last": _log_get_safe(log, "scheduler_score_gap_best_2nd_last", i, None),
@@ -730,11 +847,19 @@ def _node_meta(node_idx):
     cfg = CFG.NODES_CFG[int(node_idx)]
     return {
         "Node_ID_节点": int(node_idx),
+        "Node_Type_节点类型": str(cfg.get("node_type", cfg.get("role", ""))),
         "Node_Role_节点角色": str(cfg.get("role", "")),
         "Node_Workshop_车间": int(cfg.get("workshop", cfg.get("site", -1))),
         "Node_Is_Cloud_是否云": bool(_node_is_cloud(cfg)),
-        "Node_CPU_节点CPU": int(cfg.get("cpu", 0)),
-        "Node_Speed_节点速度": float(cfg.get("speed", 0.0)),
+        "Node_Capacity_Slots": int(get_node_capacity_slots(cfg)),
+        "Node_Num_Cores_Metadata": int(cfg.get("num_cores", cfg.get("cpu", 0))),
+        "Node_Service_Rate_GIPS": float(cfg.get("service_rate_gips", cfg.get("speed", 0.0))),
+        "Node_Memory_GB": float(cfg.get("memory_gb", 0.0)),
+        "Node_Accelerator_Type": str(cfg.get("accelerator_type", "none")),
+        "Node_Task_Affinity_RT": float(get_node_task_affinity_factor(cfg, "RT")),
+        "Node_Task_Affinity_Batch": float(get_node_task_affinity_factor(cfg, "Batch")),
+        "Node_Task_Affinity_AI": float(get_node_task_affinity_factor(cfg, "AI")),
+        "Node_RT_Reserved_Slots": int(get_reserved_slots(cfg, "RT")),
     }
 
 
@@ -1146,8 +1271,25 @@ def build_key_metric_summary_dataframe(group_logs):
         sla = _as_clean_numeric_list(log.get("sla_success_rate", []))
         backlog = _as_clean_numeric_list(log.get("backlog", []))
         completion = _as_clean_numeric_list(log.get("completion_rate", []))
+        completion_ratio = _as_clean_numeric_list(log.get("completion_ratio", []))
+        util = _as_clean_numeric_list(log.get("avg_util", []))
+        arrivals_total = _as_clean_numeric_list(log.get("arrivals_total", []))
+        completed_total = _as_clean_numeric_list(log.get("completed_total", []))
+        backlog_growth = _as_clean_numeric_list(log.get("backlog_growth_rate", []))
         cumulative_energy = _as_clean_numeric_list(log.get("cumulative_energy", []))
         cumulative_energy_real = _as_clean_numeric_list(log.get("cumulative_energy_real", []))
+        w_rt_latency = _as_clean_numeric_list(log.get("W_RT_Latency_last", []))
+        w_batch_latency = _as_clean_numeric_list(log.get("W_Batch_Latency_last", []))
+        w_ai_latency = _as_clean_numeric_list(log.get("W_AI_Latency_last", []))
+        w_queue_value = _as_clean_numeric_list(log.get("W_Queue_last", log.get("w_queue", [])))
+        w_risk_scale_value = _as_clean_numeric_list(log.get("W_Risk_Scale_last", log.get("w_risk_scale", [])))
+        cloud_gate_value = _as_clean_numeric_list(log.get("Cloud_Gate_last", log.get("cloud_gate", [])))
+        w_energy_scale_last = _as_clean_numeric_list(log.get("W_Energy_Scale_last", []))
+        w_rt_energy_last = _as_clean_numeric_list(log.get("W_RT_Energy_last", []))
+        w_batch_energy_last = _as_clean_numeric_list(log.get("W_Batch_Energy_last", []))
+        w_ai_energy_last = _as_clean_numeric_list(log.get("W_AI_Energy_last", []))
+        total_arrivals = float(np.nansum(arrivals_total)) if arrivals_total else 0.0
+        total_completed = float(np.nansum(completed_total)) if completed_total else 0.0
 
         row = {
             "Group_Key_方法键": group_key,
@@ -1159,6 +1301,10 @@ def build_key_metric_summary_dataframe(group_logs):
             "Overall_Mean_Violation_整体平均违约率": _safe_nanmean(vio),
             "Overall_Mean_SLA_整体平均SLA成功率": _safe_nanmean(sla),
             "Overall_Mean_Backlog_整体平均积压": _safe_nanmean(backlog),
+            "Overall_Mean_Utilization_Load_Calibration": _safe_nanmean(util),
+            "Overall_Total_Completion_Ratio_Load_Calibration": total_completed / max(total_arrivals, 1.0),
+            "Overall_Mean_Window_Completion_Ratio_Load_Calibration": _safe_nanmean(completion_ratio),
+            "Overall_Mean_Backlog_Growth_Rate_Load_Calibration": _safe_nanmean(backlog_growth),
             "Overall_Peak_Backlog_整体积压峰值": _safe_nanmax(backlog),
             "Final_Reward_最终评分": _safe_last(reward),
             "Final_Avg_Delay_最终平均时延": _safe_last(delay),
@@ -1166,6 +1312,26 @@ def build_key_metric_summary_dataframe(group_logs):
             "Final_Backlog_最终积压": _safe_last(backlog),
             "Final_Cumulative_Objective_Energy_最终累计目标能耗": _safe_last(cumulative_energy),
             "Final_Cumulative_Real_Energy_最终累计真实能耗": _safe_last(cumulative_energy_real),
+            "Mean_W_RT_Latency_平均RT时延权重": _safe_nanmean(w_rt_latency),
+            "Final_W_RT_Latency_最终RT时延权重": _safe_last(w_rt_latency),
+            "Mean_W_Batch_Latency_平均Batch时延权重": _safe_nanmean(w_batch_latency),
+            "Final_W_Batch_Latency_最终Batch时延权重": _safe_last(w_batch_latency),
+            "Mean_W_AI_Latency_平均AI时延权重": _safe_nanmean(w_ai_latency),
+            "Final_W_AI_Latency_最终AI时延权重": _safe_last(w_ai_latency),
+            "Mean_W_Queue_平均队列权重": _safe_nanmean(w_queue_value),
+            "Final_W_Queue_最终队列权重": _safe_last(w_queue_value),
+            "Mean_W_Risk_Scale_平均风险权重": _safe_nanmean(w_risk_scale_value),
+            "Final_W_Risk_Scale_最终风险权重": _safe_last(w_risk_scale_value),
+            "Mean_Cloud_Gate_平均云门控": _safe_nanmean(cloud_gate_value),
+            "Final_Cloud_Gate_最终云门控": _safe_last(cloud_gate_value),
+            "Mean_W_Energy_Scale_last_平均全局能耗权重": _safe_nanmean(w_energy_scale_last),
+            "Final_W_Energy_Scale_last_最终全局能耗权重": _safe_last(w_energy_scale_last),
+            "Mean_W_RT_Energy_last_平均RT能耗权重": _safe_nanmean(w_rt_energy_last),
+            "Final_W_RT_Energy_last_最终RT能耗权重": _safe_last(w_rt_energy_last),
+            "Mean_W_Batch_Energy_last_平均Batch能耗权重": _safe_nanmean(w_batch_energy_last),
+            "Final_W_Batch_Energy_last_最终Batch能耗权重": _safe_last(w_batch_energy_last),
+            "Mean_W_AI_Energy_last_平均AI能耗权重": _safe_nanmean(w_ai_energy_last),
+            "Final_W_AI_Energy_last_最终AI能耗权重": _safe_last(w_ai_energy_last),
         }
         for phase in phases:
             pidx = phase["phase_idx"]

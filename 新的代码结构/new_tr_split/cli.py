@@ -15,6 +15,10 @@ if __name__ == "__main__":
     def _parse_bounds_pair_arg(value, option_name):
         if value is None or str(value).strip() == "":
             return None
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            lo = float(value[0])
+            hi = float(value[1])
+            return (lo, hi) if lo <= hi else (hi, lo)
         parts = [p.strip() for p in str(value).split(",")]
         if len(parts) != 2:
             parser.error(f"{option_name} must be formatted as low,high")
@@ -48,7 +52,7 @@ if __name__ == "__main__":
             return False
         raise argparse.ArgumentTypeError("expected one of true/false, yes/no, on/off, 1/0")
 
-    parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "dynamic_scenario", "offline_noise"], default="all")
+    parser.add_argument("--mode", choices=["all", "param", "extreme", "scan", "sensitivity", "scenario", "ratio_grid", "pressure_scan", "dynamic_scenario", "offline_noise", "batch_federated"], default="all")
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--local-delta", type=float, default=0.08)
     parser.add_argument("--dim", type=str, default="W_RT_Latency")
@@ -66,15 +70,15 @@ if __name__ == "__main__":
     parser.add_argument("--sens-windows", type=int, default=3, help="敏感度分析每个 theta 连续评价的窗口数")
     parser.add_argument("--sens-greedy", action="store_true", help="敏感度分析时关闭 Boltzmann 随机，使用确定性机会集合选择")
     parser.add_argument("--pref-norm-mode", choices=["rolling", "fixed"], default="rolling", help="静态节点偏好诊断使用的归一化模式")
-    parser.add_argument("--task-adaptation", action="store_true", help="启用 type_speed_factor，节点对不同任务类型有差异化速度")
-    parser.add_argument("--no-task-adaptation", action="store_true", help="关闭 type_speed_factor，所有任务只使用节点基础 speed")
+    parser.add_argument("--task-adaptation", action="store_true", help="启用 task_node_affinity_factor 环境异构矩阵")
+    parser.add_argument("--no-task-adaptation", action="store_true", help="关闭 task_node_affinity_factor，所有任务只使用节点基础 service_rate_gips")
     parser.add_argument("--rt-deadline-factor", type=float, default=None, help="覆盖 RT 任务 deadline_factor，例如 2.5")
     parser.add_argument("--bo-iterations", type=int, default=None, help="覆盖 BO_ITERATIONS，便于快速测试")
     parser.add_argument("--bo-interval", type=float, default=None, help="覆盖 BO_INTERVAL")
     parser.add_argument("--session-duration", type=float, default=None, help="覆盖 SESSION_DURATION")
     parser.add_argument("--feedback-mode", choices=["window", "cohort_complete", "dual"], default="window", help="BO反馈模式：window为旧窗口级反馈；cohort_complete为任务批次完成后反馈；dual为窗口快反馈+批次/分类精反馈替换")
     parser.add_argument("--feedback-score", choices=["window_original", "task_effective", "task_effective_backlog", "task_effective_backlog_violation", "paired_fixed_mid_delta", "legacy_dual", "legacy_cohort"], default=getattr(CFG, "DEFAULT_SCENARIO_FEEDBACK_SCORE", "task_effective_backlog_violation"), help="BO tell 使用的训练反馈；当前默认 task_effective_backlog_violation。paired_fixed_mid_delta 为仿真专用：同窗口 shadow fixed_mid 的 delta cost。")
-    parser.add_argument("--cbo-reference-mode", choices=["off", "calibrate", "load", "auto_macro"], default="off", help="Scenario reference baseline mode for normalized metrics")
+    parser.add_argument("--cbo-reference-mode", choices=["off", "calibrate", "load", "auto_macro"], default=getattr(CFG, "CBO_REFERENCE_MODE", "calibrate"), help="Scenario normalization reference scale mode")
     parser.add_argument("--cbo-reference-calibration-rounds", type=int, default=30, help="Rounds used to build/freeze scenario reference")
     parser.add_argument("--cbo-reference-min-rounds", type=int, default=5, help="Minimum rounds before reference is considered available")
     parser.add_argument("--cbo-reference-stat", choices=["median", "trimmed_mean", "mean"], default="median", help="Statistic used for reference calibration")
@@ -82,7 +86,7 @@ if __name__ == "__main__":
     parser.add_argument("--cbo-reference-freeze-after-calibration", action="store_true", default=True, help="Freeze reference after calibration window")
     parser.add_argument("--cbo-reference-file", type=str, default="", help="JSON reference file to load")
     parser.add_argument("--cbo-reference-output-file", type=str, default="", help="JSON reference output file")
-    parser.add_argument("--cbo-objective-mode", choices=["eval_cost", "diagnostic_only", "normalized_tradeoff"], default="eval_cost", help="BO training objective mode")
+    parser.add_argument("--cbo-objective-mode", choices=["eval_cost", "diagnostic_only", "normalized_tradeoff"], default=getattr(CFG, "CBO_OBJECTIVE_MODE", "normalized_tradeoff"), help="BO training objective mode")
     parser.add_argument("--cbo-tradeoff-alpha", type=float, default=0.8, help="alpha in alpha*service_norm + (1-alpha)*energy_norm")
     parser.add_argument("--cbo-alpha-min", type=float, default=0.6, help="minimum clipped alpha")
     parser.add_argument("--cbo-alpha-max", type=float, default=0.95, help="maximum clipped alpha")
@@ -98,16 +102,17 @@ if __name__ == "__main__":
     parser.add_argument("--scheduler-alpha-min", type=float, default=0.60, help="scheduler alpha 下限")
     parser.add_argument("--scheduler-alpha-max", type=float, default=0.97, help="scheduler alpha 上限")
     parser.add_argument("--scheduler-le-scale", type=float, default=1.0, help="alpha_direct only: scale alpha*norm_l+(1-alpha)*norm_e before risk/queue penalties")
-    parser.add_argument("--alpha-direct-bounds", type=str, default=None, help="alpha_direct uniform BO bounds, formatted as low,high")
-    parser.add_argument("--alpha-direct-rt-bounds", type=str, default=None, help="alpha_direct RT BO bounds, formatted as low,high")
-    parser.add_argument("--alpha-direct-batch-bounds", type=str, default=None, help="alpha_direct Batch BO bounds, formatted as low,high")
-    parser.add_argument("--alpha-direct-ai-bounds", type=str, default=None, help="alpha_direct AI BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-bounds", default=getattr(CFG, "ALPHA_DIRECT_BOUNDS", None), help="alpha_direct uniform BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-rt-bounds", default=getattr(CFG, "ALPHA_DIRECT_RT_BOUNDS", None), help="alpha_direct RT BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-batch-bounds", default=getattr(CFG, "ALPHA_DIRECT_BATCH_BOUNDS", None), help="alpha_direct Batch BO bounds, formatted as low,high")
+    parser.add_argument("--alpha-direct-ai-bounds", default=getattr(CFG, "ALPHA_DIRECT_AI_BOUNDS", None), help="alpha_direct AI BO bounds, formatted as low,high")
     parser.add_argument("--alpha-direct-fixed-theta", type=str, default=None, help="Fixed alpha_direct 6D theta for cbo-alpha-direct/cbo-alpha-direct-no-risk runs")
+    parser.add_argument("--reduced7-energy-scale-bounds", default=getattr(CFG, "REDUCED7_ENERGY_SCALE_BOUNDS", None), help="reduced7 W_Energy_Scale BO bounds, formatted as low,high, e.g. 0.5,3.0")
     parser.add_argument("--scheduler-service-latency-weight", type=float, default=1.0, help="alpha tradeoff 中 norm_l 的系数")
     parser.add_argument("--scheduler-service-risk-weight", type=float, default=1.0, help="alpha 外部 risk_w*norm_risk 惩罚项的额外系数")
     parser.add_argument("--scheduler-service-queue-weight", type=float, default=1.0, help="alpha 外部 queue_w*norm_queue 惩罚项的额外系数")
     parser.add_argument("--scheduler-energy-weight", type=float, default=1.0, help="energy_component 中 norm_e 的系数")
-    parser.add_argument("--scheduler-score-norm-mode", choices=["legacy", "candidate_median", "candidate_iqr", "rolling_ema"], default="legacy", help="底层调度器 score 的 energy/latency 归一化模式；默认 legacy 保持 norm_mode 行为")
+    parser.add_argument("--scheduler-score-norm-mode", choices=["candidate_minmax_deadline", "legacy", "candidate_median", "candidate_iqr", "rolling_ema"], default=getattr(CFG, "SCHEDULER_SCORE_NORM_MODE", "candidate_minmax_deadline"), help="底层调度器 score 的 energy/latency 归一化模式；默认对当前候选节点集合按 deadline 和 min-max 归一化")
     parser.add_argument("--scheduler-norm-clip-max", type=float, default=3.0, help="scheduler score normalization clip max")
     parser.add_argument("--scheduler-norm-eps", type=float, default=1e-6, help="scheduler score normalization epsilon")
     parser.add_argument("--scheduler-norm-ema-alpha", type=float, default=0.995, help="rolling_ema scheduler normalization alpha")
@@ -123,6 +128,26 @@ if __name__ == "__main__":
     parser.add_argument("--dynamic-history-mode", choices=["all_history", "recent_window", "context_topk", "state_gated_kernel"], default=getattr(CFG, "DEFAULT_DYNAMIC_HISTORY_MODE", "all_history"), help="dynamic_scenario 的历史使用模式；state_gated_kernel 使用 workload/state/trend 硬门控+乘积核选择历史")
     parser.add_argument("--dynamic-history-window", type=int, default=getattr(CFG, "DEFAULT_DYNAMIC_HISTORY_WINDOW", 200), help="dynamic_scenario recent_window 的窗口大小")
     parser.add_argument("--dynamic-context-topk", type=int, default=getattr(CFG, "DEFAULT_DYNAMIC_CONTEXT_TOPK", 100), help="dynamic_scenario context_topk 的样本数")
+    parser.add_argument("--batch-method", choices=["fixed", "local_bo", "independent_bo", "centralized_bo", "federated_bo"], default="independent_bo", help="Static batch experiment method")
+    parser.add_argument("--batch-clients", type=int, default=3, help="Number of heterogeneous clients for static batch experiments")
+    parser.add_argument("--batch-rounds", type=int, default=20, help="BO/FBO rounds; each round evaluates one batch per active client")
+    parser.add_argument("--batch-tasks", type=int, default=120, help="Default task count per client batch")
+    parser.add_argument("--batch-client-task-counts", type=str, default=None, help="Comma-separated task counts per client; overrides --batch-tasks per client")
+    parser.add_argument("--batch-client-task-probs", type=str, default=None, help="Per-client task mix, formatted as RT,Batch,AI;RT,Batch,AI")
+    parser.add_argument("--batch-node-counts", type=str, default=None, help="Comma-separated node counts per generated client")
+    parser.add_argument("--batch-topology-profile", choices=["heterogeneous", "edge_small", "edge_large", "cloud_heavy"], default="heterogeneous", help="Generated client topology profile")
+    parser.add_argument("--batch-client-config", type=str, default=None, help="Optional JSON file defining clients, nodes, task mix, and scales")
+    parser.add_argument("--batch-context-features", type=str, default=",".join(DEFAULT_STATIC_BATCH_CONTEXT), help="Comma-separated static context features; use all or none")
+    parser.add_argument("--batch-objective-weights", type=str, default=None, help="Batch objective weights, e.g. delay=1,energy=0.25,lateness=2,violation=6,makespan=0.5,unfinished=20")
+    parser.add_argument("--batch-normalization", choices=["batch_reference", "none"], default="batch_reference", help="Batch objective normalization mode")
+    parser.add_argument("--batch-objective-clip", type=float, default=10.0, help="Clip max for normalized objective ratios; <=0 disables clipping")
+    parser.add_argument("--batch-reuse-mode", choices=["new_each_round", "fixed_per_client"], default="new_each_round", help="Use new deterministic batch per round or reuse one static batch per client")
+    parser.add_argument("--batch-order", choices=["generated", "deadline", "type_deadline", "largest_workload", "random"], default="deadline", help="Local dispatch order inside a received batch")
+    parser.add_argument("--batch-dispatch-gap", type=float, default=0.01, help="Small local dispatch gap between tasks while create_time remains batch start")
+    parser.add_argument("--batch-deterministic-scheduler", type=_parse_bool_arg, default=True, help="Disable Boltzmann sampling inside each batch evaluation for lower-noise BO feedback")
+    parser.add_argument("--batch-fed-share-mode", choices=["surrogate", "experience", "hybrid"], default="surrogate", help="Federated BO sharing mode")
+    parser.add_argument("--batch-fed-candidates", type=int, default=96, help="Candidate theta count for federated surrogate aggregation")
+    parser.add_argument("--batch-fed-beta", type=float, default=None, help="Override federated surrogate UCB beta; default uses CFG.FED_BETA")
     parser.add_argument("--bo-history-mode", choices=["all", "recent", "confidence", "recent_confidence"], default=getattr(CFG, "DEFAULT_BO_HISTORY_MODE", "recent"), help="BO GP训练历史使用方式；备份版默认 recent。all=全部；recent=最近N个；confidence=过滤低可信反馈；recent_confidence=最近+可信度过滤")
     parser.add_argument("--bo-recent-window", type=int, default=getattr(CFG, "DEFAULT_BO_RECENT_WINDOW", 80), help="recent/recent_confidence 模式保留最近多少个BO样本；备份版默认80")
     parser.add_argument("--bo-confidence-min", type=float, default=None, help="confidence/recent_confidence 模式下保留样本的最低反馈可信度")
@@ -249,7 +274,7 @@ if __name__ == "__main__":
     parser.add_argument("--cbo-condition-anchor-switch", choices=["off", "recent_best", "context_best", "robust_elite"], default=getattr(CFG, "DEFAULT_CBO_CONDITION_ANCHOR_SWITCH", "context_best"), help="Temporary anchor override after residual/condition trigger")
     parser.add_argument("--cloud-delay-mult", type=float, default=1.0, help="只作用于云目标节点的传输时延倍率，>1 表示上云更慢")
     parser.add_argument("--cloud-energy-mult", type=float, default=1.0, help="只作用于云目标节点的传输能耗倍率，>1 表示上云更耗能")
-    parser.add_argument("--cloud-speed-mult", type=float, default=1.0, help="只作用于云节点算力的速度倍率，<1 表示云算力被削弱")
+    parser.add_argument("--cloud-speed-mult", "--cloud-service-rate-mult", dest="cloud_speed_mult", type=float, default=1.0, help="只作用于云节点服务率的倍率，<1 表示云服务率被削弱")
     parser.add_argument("--export-short-names", action="store_true", help="实验结束后复制一份短英文文件名结果到 output_root/_short_export，并打包 tar.gz")
     args = parser.parse_args()
     print("[BackupDefaults] no RoundRobin default methods = " + ",".join(DEFAULT_SCENARIO_KEYS))
@@ -264,6 +289,7 @@ if __name__ == "__main__":
         CFG.USE_TASK_TYPE_ADAPTATION = True
     if args.no_task_adaptation:
         CFG.USE_TASK_TYPE_ADAPTATION = False
+    print(f"[TaskAdaptation] task_adaptation={bool(CFG.USE_TASK_TYPE_ADAPTATION)} field=task_node_affinity_factor")
     if args.fixed_rng:
         CFG.USE_FIXED_RNG = True
     if args.fixed_seed is not None:
@@ -273,6 +299,7 @@ if __name__ == "__main__":
         CFG.USE_BOLTZMANN_RANDOM = False
     if args.rt_deadline_factor is not None:
         CFG.TASK_PROPS["RT"]["deadline_factor"] = float(args.rt_deadline_factor)
+        CFG.TASK_PROPS["RT"]["deadline"] = get_task_duration_reference(CFG.TASK_PROPS["RT"]) * float(args.rt_deadline_factor)
     if args.bo_iterations is not None:
         CFG.BO_ITERATIONS = int(args.bo_iterations)
     if args.bo_interval is not None:
@@ -310,11 +337,13 @@ if __name__ == "__main__":
     alpha_direct_batch_bounds = _parse_bounds_pair_arg(args.alpha_direct_batch_bounds, "--alpha-direct-batch-bounds")
     alpha_direct_ai_bounds = _parse_bounds_pair_arg(args.alpha_direct_ai_bounds, "--alpha-direct-ai-bounds")
     alpha_direct_fixed_theta = _parse_float_list_arg(args.alpha_direct_fixed_theta, "--alpha-direct-fixed-theta", 6)
+    reduced7_energy_scale_bounds = _parse_bounds_pair_arg(args.reduced7_energy_scale_bounds, "--reduced7-energy-scale-bounds")
     CFG.ALPHA_DIRECT_BOUNDS = alpha_direct_bounds
     CFG.ALPHA_DIRECT_RT_BOUNDS = alpha_direct_rt_bounds
     CFG.ALPHA_DIRECT_BATCH_BOUNDS = alpha_direct_batch_bounds
     CFG.ALPHA_DIRECT_AI_BOUNDS = alpha_direct_ai_bounds
     CFG.ALPHA_DIRECT_FIXED_THETA = alpha_direct_fixed_theta
+    CFG.REDUCED7_ENERGY_SCALE_BOUNDS = reduced7_energy_scale_bounds
     CFG.SCHEDULER_SERVICE_LATENCY_WEIGHT = float(args.scheduler_service_latency_weight)
     CFG.SCHEDULER_SERVICE_RISK_WEIGHT = float(args.scheduler_service_risk_weight)
     CFG.SCHEDULER_SERVICE_QUEUE_WEIGHT = float(args.scheduler_service_queue_weight)
@@ -337,6 +366,10 @@ if __name__ == "__main__":
         f"[ALPHA-DIRECT-BOUNDS] uniform={CFG.ALPHA_DIRECT_BOUNDS} "
         f"rt={CFG.ALPHA_DIRECT_RT_BOUNDS} batch={CFG.ALPHA_DIRECT_BATCH_BOUNDS} ai={CFG.ALPHA_DIRECT_AI_BOUNDS} "
         f"fixed_theta={CFG.ALPHA_DIRECT_FIXED_THETA}",
+        flush=True,
+    )
+    print(
+        f"[REDUCED7-BOUNDS] energy_scale={CFG.REDUCED7_ENERGY_SCALE_BOUNDS}",
         flush=True,
     )
     print(
@@ -501,6 +534,7 @@ if __name__ == "__main__":
     CFG.CLOUD_DELAY_MULT = float(args.cloud_delay_mult)
     CFG.CLOUD_ENERGY_MULT = float(args.cloud_energy_mult)
     CFG.CLOUD_SPEED_MULT = float(args.cloud_speed_mult)
+    CFG.CLOUD_SERVICE_RATE_MULT = float(args.cloud_speed_mult)
     fixed_task_probs = parse_task_probs_arg(args.task_probs)
     if fixed_task_probs is not None:
         CFG.TASK_TYPE_PROBS = fixed_task_probs
@@ -573,6 +607,33 @@ if __name__ == "__main__":
             repeat_runs=max(1, args.repeat),
             selected_keys=selected_keys,
             output_dir=args.output_root,
+        )
+    elif args.mode == "batch_federated":
+        run_static_batch_federated_experiment(
+            method=args.batch_method,
+            n_clients=max(1, args.batch_clients),
+            rounds=max(1, args.batch_rounds),
+            task_count=max(1, args.batch_tasks),
+            task_counts=args.batch_client_task_counts,
+            seed=int(CFG.FIXED_RNG_SEED if args.fixed_seed is None else args.fixed_seed),
+            output_root=args.output_root,
+            topology_profile=args.batch_topology_profile,
+            node_counts=args.batch_node_counts,
+            task_probs_by_client=args.batch_client_task_probs,
+            client_config_path=args.batch_client_config,
+            context_features=args.batch_context_features,
+            objective_weights=args.batch_objective_weights,
+            normalization=args.batch_normalization,
+            objective_clip=args.batch_objective_clip,
+            batch_reuse_mode=args.batch_reuse_mode,
+            batch_order=args.batch_order,
+            scheduler_type="Boltzmann",
+            norm_mode=args.pref_norm_mode,
+            deterministic_scheduler=bool(args.batch_deterministic_scheduler),
+            dispatch_gap=float(args.batch_dispatch_gap),
+            fed_share_mode=args.batch_fed_share_mode,
+            fed_candidate_count=max(1, args.batch_fed_candidates),
+            fed_beta=args.batch_fed_beta,
         )
     elif args.mode == "ratio_grid":
         selected_keys = None
