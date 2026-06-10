@@ -42,6 +42,32 @@ class BoltzmannScheduler:
         self.norm_floor = float(getattr(CFG, "SCHEDULER_NORM_EPS", 1e-6))
         self.norm_refs = self._init_task_type_norm_refs()
         self.last_score_debug = {}
+        self._node_static_cache_key = None
+        self._node_static_cache = None
+
+    def _get_node_static_cache(self, nodes):
+        key = tuple(
+            (
+                id(node),
+                int(getattr(node, "id", idx)),
+                bool(getattr(node, "is_cloud", False)),
+                float(getattr(node, "cpu_total", 1.0)),
+                float(getattr(node, "p_idle", 0.0)),
+                float(getattr(node, "p_max", 0.0)),
+            )
+            for idx, node in enumerate(nodes)
+        )
+        if key == self._node_static_cache_key and self._node_static_cache is not None:
+            return self._node_static_cache
+        self._node_static_cache_key = key
+        self._node_static_cache = {
+            "node_ids": np.array([int(getattr(node, "id", idx)) for idx, node in enumerate(nodes)], dtype=int),
+            "is_cloud": np.array([bool(getattr(node, "is_cloud", False)) for node in nodes], dtype=bool),
+            "cpu_total": np.array([float(getattr(node, "cpu_total", 1.0)) for node in nodes], dtype=float),
+            "p_idle": np.array([float(getattr(node, "p_idle", 0.0)) for node in nodes], dtype=float),
+            "p_max": np.array([float(getattr(node, "p_max", 0.0)) for node in nodes], dtype=float),
+        }
+        return self._node_static_cache
 
     def _init_task_type_norm_refs(self):
         """根据任务属性和节点配置，初始化每类任务的 energy / latency 参考尺度。"""
@@ -321,12 +347,9 @@ class BoltzmannScheduler:
     def _compute_queue_slot_norms(self, candidates):
         if not getattr(CFG, "USE_QUEUE_PRESSURE_SCORE", True):
             return np.zeros(len(candidates), dtype=float), "disabled"
-        vals = []
-        for c in candidates:
-            used = float(c.get("used_slots", 0.0))
-            cap = max(float(c.get("capacity_slots", 1.0)), self.norm_floor)
-            vals.append(used / cap)
-        return np.clip(np.array(vals, dtype=float), 0.0, 1.0), "used_slots_over_capacity"
+        used = np.array([float(c.get("used_slots", 0.0)) for c in candidates], dtype=float)
+        cap = np.maximum(np.array([float(c.get("capacity_slots", 1.0)) for c in candidates], dtype=float), self.norm_floor)
+        return np.clip(used / cap, 0.0, 1.0), "used_slots_over_capacity"
 
     def _resolve_scheduler_alpha(self, task_type, latency_w, energy_w, theta_full=None, controls=None):
         mode = str(getattr(CFG, "SCHEDULER_TRADEOFF_MODE", "legacy") or "legacy").lower()
@@ -538,9 +561,17 @@ class ConstrainedBoltzmannScheduler(BoltzmannScheduler):
         return float(np.clip(pressure, 0.0, float(getattr(CFG, "QUEUE_PRESSURE_CLIP", 3.0))))
 
     def _local_cloud_pressure(self, nodes):
-        edge_nodes = [n for n in nodes if not getattr(n, "is_cloud", False)] or list(nodes)
-        avg_util = float(np.mean([n.utilization() for n in edge_nodes])) if edge_nodes else 0.0
-        backlog = float(sum(len(n.ready_queue) + len(n.running_tasks) for n in edge_nodes))
+        if not nodes:
+            return 0.0
+        static = self._get_node_static_cache(nodes)
+        edge_mask = ~static["is_cloud"]
+        if not bool(np.any(edge_mask)):
+            edge_mask = np.ones(len(nodes), dtype=bool)
+        cpu_free = np.array([float(getattr(n, "cpu_free", 0.0)) for n in nodes], dtype=float)
+        cpu_total = np.maximum(static["cpu_total"], 1.0)
+        util = np.clip(1.0 - cpu_free / cpu_total, 0.0, 1.0)
+        avg_util = float(np.mean(util[edge_mask])) if bool(np.any(edge_mask)) else 0.0
+        backlog = float(sum(len(n.ready_queue) + len(n.running_tasks) for i, n in enumerate(nodes) if bool(edge_mask[i])))
         backlog_norm = backlog / max(1.0, float(getattr(CFG, "CLOUD_GATE_BACKLOG_NORM", 24.0)))
         pressure = (
             float(getattr(CFG, "CLOUD_GATE_PRESSURE_UTIL_WEIGHT", 0.7)) * avg_util

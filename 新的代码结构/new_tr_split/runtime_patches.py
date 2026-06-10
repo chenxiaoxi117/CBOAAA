@@ -1837,6 +1837,9 @@ def _cbo_build_reference(records):
         "energy_per_arrival_ref": _cbo_metric_reference_stat([r.get("window_energy_per_arrival", r.get("energy_per_arrival")) for r in records], stat, trim),
         "energy_norm_ref": _cbo_metric_reference_stat([r.get("window_energy_norm", r.get("energy_norm")) for r in records], stat, trim),
         "unfinished_rate_ref": _cbo_metric_reference_stat([r.get("unfinished_rate") for r in records], stat, trim),
+        "backlog_ref": _cbo_metric_reference_stat([r.get("unfinished_end", r.get("window_unfinished_total")) for r in records], stat, trim),
+        "backlog_growth_ref": _cbo_metric_reference_stat([r.get("backlog_growth") for r in records], stat, trim),
+        "backlog_growth_rate_ref": _cbo_metric_reference_stat([r.get("backlog_growth_rate") for r in records], stat, trim),
         "rt_violation_rate_ref": _cbo_metric_reference_stat([r.get("window_rt_violation_rate") for r in records], stat, trim),
         "success_rate_ref": _cbo_metric_reference_stat([r.get("sla_success_rate") for r in records], stat, trim),
         "eval_cost_ref": _cbo_metric_reference_stat([r.get("cost") for r in records], stat, trim),
@@ -1968,6 +1971,29 @@ def _cbo_metric_reference_patch(factory, metrics):
     active_phase = _cbo_metric_active_phase(factory)
     active_phase_signature = str(active_phase.get("phase_signature", active_phase.get("signature", ""))) if isinstance(active_phase, dict) else ""
     active_reference_id = str(active_phase.get("active_reference_id", "")) if isinstance(active_phase, dict) else ""
+    active_phase_iter = None
+    phase_reference_base_phase_id = None
+    phase_reference_is_new_scene = False
+    phase_reference_warmup_rounds = max(0, int(getattr(CFG, "PHASE_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))))
+    if isinstance(active_phase, dict):
+        current_iter = _cbo_metric_current_iter(factory)
+        try:
+            active_phase_iter = int(current_iter) - int(active_phase.get("iter_start", current_iter)) + 1
+        except Exception:
+            active_phase_iter = None
+        try:
+            phase_reference_base_phase_id = int(active_phase.get("phase_signature_base_phase_id", active_phase.get("phase_id", 0)))
+            phase_reference_is_new_scene = phase_reference_base_phase_id == int(active_phase.get("phase_id", -1))
+        except Exception:
+            phase_reference_base_phase_id = None
+            phase_reference_is_new_scene = False
+    phase_reference_warmup_window = (
+        bool(getattr(CFG, "DYNAMIC_SCENARIO_ACTIVE", False))
+        and bool(phase_reference_is_new_scene)
+        and active_phase_iter is not None
+        and phase_reference_warmup_rounds > 0
+        and int(active_phase_iter) <= int(phase_reference_warmup_rounds)
+    )
     cached_ref, cached_phase, cached_signature, cached_status = _cbo_metric_reference_from_cache(factory)
 
     shared_ref = cached_ref if isinstance(cached_ref, dict) else getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE", None)
@@ -2033,12 +2059,14 @@ def _cbo_metric_reference_patch(factory, metrics):
 
     reference_source = "none"
     if isinstance(cached_ref, dict):
-        reference_source = "precomputed_phase_reference_cache"
+        reference_source = str(cached_ref.get("reference_source", "phase_triggered_shared_reference_bank"))
     elif ref_status in {"shared_frozen", "cache_frozen"}:
         reference_source = "shared_precomputed_reference"
     elif str(ref_status).startswith("calibrating"):
         reference_source = "online_warm_up"
-    is_calibration_window = bool(str(ref_status).startswith("calibrating"))
+    is_calibration_window = bool(str(ref_status).startswith("calibrating") or phase_reference_warmup_window)
+    if phase_reference_warmup_window and isinstance(cached_ref, dict):
+        ref_status = "cache_frozen_phase_warmup"
 
     ref_available = isinstance(ref, dict)
     if reference_source == "none" and ref_available:
@@ -2047,6 +2075,9 @@ def _cbo_metric_reference_patch(factory, metrics):
     energy_ref = _cbo_metric_float(ref.get("energy_per_arrival_ref") if ref_available else np.nan)
     energy_norm_ref = _cbo_metric_float(ref.get("energy_norm_ref") if ref_available else np.nan)
     unfinished_ref = _cbo_metric_float(ref.get("unfinished_rate_ref") if ref_available else np.nan)
+    backlog_ref = _cbo_metric_float(ref.get("backlog_ref") if ref_available else np.nan)
+    backlog_growth_ref = _cbo_metric_float(ref.get("backlog_growth_ref") if ref_available else np.nan)
+    backlog_growth_rate_ref = _cbo_metric_float(ref.get("backlog_growth_rate_ref") if ref_available else np.nan)
     rt_vio_ref = _cbo_metric_float(ref.get("rt_violation_rate_ref") if ref_available else np.nan)
     success_ref = _cbo_metric_float(ref.get("success_rate_ref") if ref_available else np.nan)
     eval_ref = _cbo_metric_float(ref.get("eval_cost_ref") if ref_available else np.nan)
@@ -2064,6 +2095,9 @@ def _cbo_metric_reference_patch(factory, metrics):
         energy_norm = _cbo_metric_clip_ratio(energy_per_arrival / energy_ref) if np.isfinite(energy_ref) and abs(energy_ref) > eps else np.nan
     eval_cost_norm = _cbo_metric_clip_ratio(eval_cost / eval_ref) if np.isfinite(eval_ref) and abs(eval_ref) > eps else np.nan
     unfinished_norm = _cbo_metric_clip_ratio(unfinished_rate / unfinished_ref) if np.isfinite(unfinished_ref) and unfinished_ref > eps else np.nan
+    backlog_norm = _cbo_metric_clip_ratio(float(system_backlog_end) / backlog_ref, lo=0.0) if np.isfinite(backlog_ref) and backlog_ref > eps else np.nan
+    backlog_growth_norm = _cbo_metric_clip_ratio(float(backlog_growth) / backlog_growth_ref, lo=0.0) if np.isfinite(backlog_growth_ref) and backlog_growth_ref > eps else np.nan
+    backlog_growth_rate_norm = _cbo_metric_clip_ratio(float(backlog_growth_rate) / backlog_growth_rate_ref, lo=0.0) if np.isfinite(backlog_growth_rate_ref) and backlog_growth_rate_ref > eps else np.nan
     rt_violation_norm = _cbo_metric_clip_ratio(window_rt_vio / rt_vio_ref) if np.isfinite(rt_vio_ref) and rt_vio_ref > eps and np.isfinite(window_rt_vio) else np.nan
 
     target_success = float(getattr(CFG, "CBO_TARGET_SUCCESS_RATE", 0.995))
@@ -2076,7 +2110,6 @@ def _cbo_metric_reference_patch(factory, metrics):
         service_norm += float(getattr(CFG, "CBO_UNFINISHED_PENALTY_WEIGHT", 5.0)) * float(unfinished_rate)
         if np.isfinite(success_shortfall_norm):
             service_norm += float(getattr(CFG, "CBO_SUCCESS_SHORTFALL_WEIGHT", 2.0)) * float(success_shortfall_norm)
-        service_norm += float(getattr(CFG, "CBO_BACKLOG_GROWTH_PENALTY_WEIGHT", 2.0)) * float(backlog_growth_rate)
         if bool(class_imbalance_available) and np.isfinite(class_imbalance_penalty):
             service_norm += float(getattr(CFG, "CBO_CLASS_IMBALANCE_WEIGHT", 0.0)) * float(class_imbalance_penalty)
 
@@ -2095,22 +2128,32 @@ def _cbo_metric_reference_patch(factory, metrics):
         "cbo_reference_frozen": bool(ref_frozen),
         "phase_id": int(active_phase.get("phase_id")) if isinstance(active_phase, dict) and active_phase.get("phase_id") is not None else None,
         "phase_name": str(active_phase.get("phase_name", "")) if isinstance(active_phase, dict) else "",
+        "phase_iter": int(active_phase_iter) if active_phase_iter is not None else None,
         "phase_signature": str(active_phase_signature),
         "active_reference_id": str(active_reference_id),
         "reference_source": str(reference_source),
         "is_calibration_window": bool(is_calibration_window),
         "calibration_window_label": str(getattr(CFG, "PHASE_CALIBRATION_WINDOW_LABEL", "warm_up")) if is_calibration_window else "",
         "phase_reference_cache_status": str(cached_status),
+        "phase_reference_warmup_rounds": int(phase_reference_warmup_rounds),
+        "phase_reference_is_new_scene": bool(phase_reference_is_new_scene),
+        "phase_reference_base_phase_id": int(phase_reference_base_phase_id) if phase_reference_base_phase_id is not None else None,
         "delay_ref": delay_ref,
         "energy_per_arrival_ref": energy_ref,
         "energy_norm_ref": energy_norm_ref,
         "unfinished_rate_ref": unfinished_ref,
+        "backlog_ref": backlog_ref,
+        "backlog_growth_ref": backlog_growth_ref,
+        "backlog_growth_rate_ref": backlog_growth_rate_ref,
         "rt_violation_rate_ref": rt_vio_ref,
         "success_rate_ref": success_ref,
         "eval_cost_ref": eval_ref,
         "delay_norm": delay_norm,
         "energy_norm": energy_norm,
         "unfinished_norm": unfinished_norm,
+        "backlog_norm": backlog_norm,
+        "backlog_growth_norm": backlog_growth_norm,
+        "backlog_growth_rate_norm": backlog_growth_rate_norm,
         "rt_violation_norm": rt_violation_norm,
         "eval_cost_norm": eval_cost_norm,
         "success_shortfall": success_shortfall,
@@ -2133,10 +2176,10 @@ def _cbo_log_reference_fields(perf_log, metrics):
         "completion_ratio", "unfinished_rate", "backlog_growth", "backlog_growth_rate", "energy_per_arrival", "energy_metric_source",
         "class_imbalance_available", "min_class_success_rate", "class_imbalance_penalty",
         "cbo_reference_mode", "cbo_reference_available", "cbo_reference_status", "cbo_reference_round_count", "cbo_reference_frozen",
-        "phase_id", "phase_name", "phase_signature", "active_reference_id", "reference_source", "is_calibration_window",
-        "calibration_window_label", "phase_reference_cache_status",
-        "delay_ref", "energy_per_arrival_ref", "energy_norm_ref", "unfinished_rate_ref", "rt_violation_rate_ref", "success_rate_ref", "eval_cost_ref",
-        "delay_norm", "energy_norm", "unfinished_norm", "rt_violation_norm", "eval_cost_norm",
+        "phase_id", "phase_name", "phase_iter", "phase_signature", "active_reference_id", "reference_source", "is_calibration_window",
+        "calibration_window_label", "phase_reference_cache_status", "phase_reference_warmup_rounds", "phase_reference_is_new_scene", "phase_reference_base_phase_id",
+        "delay_ref", "energy_per_arrival_ref", "energy_norm_ref", "unfinished_rate_ref", "backlog_ref", "backlog_growth_ref", "backlog_growth_rate_ref", "rt_violation_rate_ref", "success_rate_ref", "eval_cost_ref",
+        "delay_norm", "energy_norm", "unfinished_norm", "backlog_norm", "backlog_growth_norm", "backlog_growth_rate_norm", "rt_violation_norm", "eval_cost_norm",
         "success_shortfall", "success_shortfall_norm", "service_norm", "normalized_tradeoff_score",
         "cbo_objective_mode", "tradeoff_alpha", "scenario_reference_mode", "scenario_reference_status", "scenario_reference_name", "bo_training_cost_source",
     ]

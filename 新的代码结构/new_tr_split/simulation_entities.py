@@ -107,14 +107,31 @@ class Node:
         self.cpu_free = self.cpu_total
         self.ready_queue = []
         self.running_tasks = []
+        self._effective_speed_cache = {}
+        self._task_affinity_cache = {}
+        self._reserved_slots_rt = get_reserved_slots(self.cfg, "RT")
+        self._transfer_static_cache = {}
 
     def effective_speed(self, task_or_type):
         task_type = task_or_type.task_type if hasattr(task_or_type, "task_type") else str(task_or_type)
-        return get_effective_speed(self.cfg, task_type)
+        key = (
+            task_type,
+            bool(getattr(CFG, "USE_TASK_TYPE_ADAPTATION", False)),
+            float(getattr(CFG, "CLOUD_SERVICE_RATE_MULT", getattr(CFG, "CLOUD_SPEED_MULT", 1.0))),
+        )
+        cached = self._effective_speed_cache.get(key)
+        if cached is None:
+            cached = float(get_effective_speed(self.cfg, task_type))
+            self._effective_speed_cache[key] = cached
+        return cached
 
     def task_node_affinity_factor(self, task_or_type):
         task_type = task_or_type.task_type if hasattr(task_or_type, "task_type") else str(task_or_type)
-        return get_node_task_affinity_factor(self.cfg, task_type)
+        cached = self._task_affinity_cache.get(task_type)
+        if cached is None:
+            cached = float(get_node_task_affinity_factor(self.cfg, task_type))
+            self._task_affinity_cache[task_type] = cached
+        return cached
 
     def utilization(self):
         return float(np.clip(1.0 - self.cpu_free / max(1.0, float(self.cpu_total)), 0.0, 1.0))
@@ -150,7 +167,7 @@ class Node:
         return get_transmission_delay(self.id, origin, getattr(task, "download_size", 0.0), include_local=True, direction="download")
 
     def _reserved_slots_for_non_rt(self):
-        return get_reserved_slots(self.cfg, "RT")
+        return self._reserved_slots_rt
 
     def _startable_free_slots(self, task):
         reserve = 0 if getattr(task, "task_type", "Batch") == "RT" else self._reserved_slots_for_non_rt()
@@ -231,10 +248,72 @@ class Node:
         share = min(1.0, max(0.05, task.cpu_req / max(1.0, float(self.cpu_total))))
         return power_after * service_time * share
 
+    def _transfer_static_terms(self, origin_node_idx, target_node_idx, direction):
+        origin = int(origin_node_idx) if origin_node_idx is not None and origin_node_idx >= 0 else int(target_node_idx)
+        target = int(target_node_idx)
+        direction = str(direction).lower()
+        base_delay = float(CFG.TRANS_DELAY_MATRIX[origin][target])
+        bw = float(CFG.TRANS_BW_MATRIX[origin][target]) if hasattr(CFG, "TRANS_BW_MATRIX") else float(CFG.LINK_BW)
+        factor_matrix = getattr(CFG, "WORKSHOP_TRANS_ENERGY_FACTOR", None)
+        src_site = _get_node_site_from_cfg(CFG.NODES_CFG[origin], default_site=origin // 2)
+        dst_site = _get_node_site_from_cfg(CFG.NODES_CFG[target], default_site=target // 2)
+        if factor_matrix is not None:
+            energy_factor = float(factor_matrix[src_site][dst_site])
+        else:
+            energy_factor = 1.0 + 0.25 * float(CFG.TRANS_DELAY_MATRIX[origin][target])
+        key = (
+            origin,
+            target,
+            direction,
+            id(getattr(CFG, "TRANS_DELAY_MATRIX", None)),
+            id(getattr(CFG, "TRANS_BW_MATRIX", None)),
+            id(factor_matrix),
+            base_delay,
+            bw,
+            energy_factor,
+            float(getattr(CFG, "CLOUD_DELAY_MULT", 1.0)),
+            float(getattr(CFG, "CLOUD_ENERGY_MULT", 1.0)),
+            float(getattr(CFG, "LOCAL_DOWNLOAD_DELAY", 0.0)),
+            float(getattr(CFG, "LOCAL_UPLOAD_DELAY", 0.0)),
+            float(getattr(CFG, "P_TRANS", 0.5)),
+        )
+        cached = self._transfer_static_cache.get(key)
+        if cached is not None:
+            return cached
+
+        cloud_pair = _node_is_cloud(CFG.NODES_CFG[origin]) or _node_is_cloud(CFG.NODES_CFG[target])
+        delay_mult = float(getattr(CFG, "CLOUD_DELAY_MULT", 1.0)) if cloud_pair else 1.0
+        local_delay = float(getattr(CFG, "LOCAL_DOWNLOAD_DELAY", 0.0)) if direction == "download" else float(getattr(CFG, "LOCAL_UPLOAD_DELAY", 0.0))
+
+        energy_mult = float(getattr(CFG, "CLOUD_ENERGY_MULT", 1.0)) if cloud_pair else 1.0
+
+        cached = (base_delay, bw, delay_mult, local_delay, energy_factor, energy_mult)
+        self._transfer_static_cache[key] = cached
+        return cached
+
+    def _cached_transmission_delay(self, origin_node_idx, target_node_idx, data_size, direction):
+        if float(data_size) <= 0.0:
+            return 0.0
+        base_delay, bw, delay_mult, local_delay, _, _ = self._transfer_static_terms(origin_node_idx, target_node_idx, direction)
+        delay = base_delay + float(data_size) / (bw + 1e-9)
+        delay *= delay_mult
+        delay += local_delay
+        return max(0.0, delay)
+
+    def _cached_transmission_energy(self, origin_node_idx, target_node_idx, data_size, direction):
+        if float(data_size) <= 0.0:
+            return 0.0
+        _, _, _, _, energy_factor, energy_mult = self._transfer_static_terms(origin_node_idx, target_node_idx, direction)
+        energy = float(getattr(CFG, "P_TRANS", 0.5)) * float(data_size) * energy_factor
+        energy *= energy_mult
+        return energy
+
     def estimate_metrics(self, task, current_time, origin_node_idx=None):
         origin = origin_node_idx if origin_node_idx is not None and origin_node_idx >= 0 else self.id
-        t_upload = get_transmission_delay(origin, self.id, getattr(task, "upload_size", task.data_size), include_local=True, direction="upload")
-        t_download = get_transmission_delay(self.id, origin, getattr(task, "download_size", 0.0), include_local=True, direction="download")
+        upload_size = getattr(task, "upload_size", task.data_size)
+        download_size = getattr(task, "download_size", 0.0)
+        t_upload = self._cached_transmission_delay(origin, self.id, upload_size, direction="upload")
+        t_download = self._cached_transmission_delay(self.id, origin, download_size, direction="download")
 
         ready_time = float(current_time) + float(t_upload)
         earliest_start = self._estimate_earliest_start_time(task, ready_time)
@@ -247,8 +326,8 @@ class Node:
         expected_latency = t_upload + wait_time + t_comp + t_download
 
         e_comp = self.estimate_compute_energy_for_task(task)
-        e_upload = get_transmission_energy(origin, self.id, getattr(task, "upload_size", task.data_size))
-        e_download = get_transmission_energy(self.id, origin, getattr(task, "download_size", 0.0))
+        e_upload = self._cached_transmission_energy(origin, self.id, upload_size, direction="upload")
+        e_download = self._cached_transmission_energy(self.id, origin, download_size, direction="download")
         e_trans = e_upload + e_download
         expected_energy = e_comp + e_trans
         return expected_energy, expected_latency

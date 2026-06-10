@@ -927,6 +927,7 @@ class ExperimentConfig:
     PHASE_RESOURCE_PERTURBATION_ID = "normal"
     PHASE_LINK_PROFILE_ID = "normal"
     PHASE_CALIBRATION_WINDOW_LABEL = "warm_up"
+    PHASE_REFERENCE_WARMUP_ROUNDS = 5
 
     HARD_DEADLINE = False  # 预留开关；当前不再默认硬筛选 RT 可行节点
 

@@ -1473,7 +1473,10 @@ def prepare_shared_scenario_normalization_reference(groups, output_dir=None):
         print("[WARN] no fixed probe policy found; scenario normalization reference will use per-method fallback")
         return None
 
-    rounds = max(1, int(getattr(CFG, "CBO_REFERENCE_CALIBRATION_ROUNDS", 30)))
+    if active_plan:
+        rounds = max(1, int(getattr(CFG, "PHASE_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))))
+    else:
+        rounds = max(1, int(getattr(CFG, "CBO_REFERENCE_CALIBRATION_ROUNDS", 30)))
     old_ref_mode = str(getattr(CFG, "CBO_REFERENCE_MODE", "off"))
     old_shared_ref = getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE", None)
     build_ref = globals().get("_cbo_build_reference")
@@ -1547,8 +1550,11 @@ def prepare_shared_scenario_normalization_reference(groups, output_dir=None):
                 "source_policy_key": str(probe_key),
                 "source_policy_label": str(probe_cfg.get("label", probe_key)),
                 "source": "phase_probe_fixed_policy",
-                "reference_source": "precomputed_phase_reference_cache",
+                "reference_source": "phase_triggered_shared_reference_bank",
                 "shared_by_methods": True,
+                "phase_reference_mode": "phase_triggered_fixed_probe",
+                "phase_reference_warmup_rounds": int(rounds),
+                "phase_reference_freeze_policy": "freeze_within_phase",
                 "calibration_window_label": str(getattr(CFG, "PHASE_CALIBRATION_WINDOW_LABEL", "warm_up")),
             })
             cache[signature] = ref
@@ -1959,6 +1965,7 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "task_adaptation_field": "task_node_affinity_factor",
             "phase_reference_scope": str(getattr(CFG, "PHASE_REFERENCE_SCOPE", "significant_external")),
             "phase_reference_switch_mode": str(getattr(CFG, "PHASE_REFERENCE_SWITCH_MODE", "dynamic_schedule")),
+            "phase_reference_warmup_rounds": int(getattr(CFG, "PHASE_REFERENCE_WARMUP_ROUNDS", 5)),
             "phase_lambda_rel_threshold": float(getattr(CFG, "PHASE_LAMBDA_REL_THRESHOLD", 0.30)),
             "phase_task_mix_l1_threshold": float(getattr(CFG, "PHASE_TASK_MIX_L1_THRESHOLD", 0.25)),
             "phase_deadline_pressure_rel_threshold": float(getattr(CFG, "PHASE_DEADLINE_PRESSURE_REL_THRESHOLD", 0.20)),
@@ -2232,6 +2239,12 @@ def save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir):
                     "dynamic_phase_lambda", "dynamic_phase_rt_prob", "dynamic_phase_batch_prob",
                     "dynamic_phase_ai_prob", "dynamic_phase_signature", "phase_signature",
                     "active_reference_id", "phase_signature_reason", "is_calibration_window",
+                    "calibration_window_label", "phase_reference_warmup_rounds", "phase_reference_is_new_scene",
+                    "phase_reference_base_phase_id", "reference_source", "phase_reference_cache_status",
+                    "delay_ref", "energy_per_arrival_ref", "energy_norm_ref", "unfinished_rate_ref",
+                    "backlog_ref", "backlog_growth_ref", "backlog_growth_rate_ref", "rt_violation_rate_ref",
+                    "delay_norm", "energy_norm", "unfinished_norm", "backlog_norm", "backlog_growth_norm",
+                    "backlog_growth_rate_norm", "rt_violation_norm", "normalized_tradeoff_score",
                     "dynamic_history_mode",
                 ]:
                     round_df[k] = log.get(k, [None] * n)
@@ -2250,6 +2263,13 @@ def save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir):
                 if seg.empty:
                     continue
                 cost = pd.to_numeric(seg[cost_col], errors="coerce")
+                warm_col = "is_calibration_window" if "is_calibration_window" in seg.columns else None
+                if warm_col:
+                    warm_mask = seg[warm_col].astype(str).str.lower().isin(["true", "1", "yes"])
+                else:
+                    warm_mask = pd.Series(False, index=seg.index)
+                post_seg = seg.loc[~warm_mask].copy()
+                post_cost = pd.to_numeric(post_seg[cost_col], errors="coerce") if not post_seg.empty else pd.Series(dtype=float)
                 r50 = cost.rolling(50).mean()
                 phase_rows.append({
                     "method": group_key,
@@ -2263,10 +2283,16 @@ def save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir):
                     "Batch": float(ph["batch_prob"]),
                     "AI": float(ph["ai_prob"]),
                     "phase_rows": int(len(seg)),
+                    "phase_warmup_rows": int(warm_mask.sum()),
+                    "phase_post_calibration_rows": int(len(post_seg)),
                     "phase_mean": float(cost.mean()),
+                    "phase_post_calibration_mean": float(post_cost.mean()) if len(post_cost) else np.nan,
                     "phase_first20": float(cost.head(20).mean()),
+                    "phase_post_calibration_first20": float(post_cost.head(20).mean()) if len(post_cost) else np.nan,
                     "phase_first50": float(cost.head(50).mean()),
+                    "phase_post_calibration_first50": float(post_cost.head(50).mean()) if len(post_cost) else np.nan,
                     "phase_last50": float(cost.tail(50).mean()),
+                    "phase_post_calibration_last50": float(post_cost.tail(50).mean()) if len(post_cost) else np.nan,
                     "phase_rolling50_min": float(r50.min()) if r50.notna().any() else np.nan,
                     "phase_rolling50_min_iter": int(r50.idxmin() - seg.index.min() + 1) if r50.notna().any() else np.nan,
                     "phase_rebound_pct": float(100.0 * (cost.tail(50).mean() - r50.min()) / abs(r50.min())) if r50.notna().any() and abs(float(r50.min())) > 1e-12 else np.nan,
@@ -2282,7 +2308,14 @@ def save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir):
                 if seg.empty:
                     continue
                 cost = pd.to_numeric(seg[cost_col], errors="coerce")
+                warm_col = "is_calibration_window" if "is_calibration_window" in seg.columns else None
+                if warm_col:
+                    warm_mask = seg[warm_col].astype(str).str.lower().isin(["true", "1", "yes"])
+                else:
+                    warm_mask = pd.Series(False, index=seg.index)
+                post_cost = pd.to_numeric(seg.loc[~warm_mask, cost_col], errors="coerce")
                 phase_last50 = float(cost.tail(50).mean())
+                post_phase_last50 = float(post_cost.tail(50).mean()) if len(post_cost) else np.nan
                 threshold = 1.05 * phase_last50
                 transition_rows.append({
                     "method": group_key,
@@ -2294,8 +2327,11 @@ def save_dynamic_experiment_summaries(group_logs, phase_plan, output_dir):
                     "to_phase_name": str(ph["phase_name"]),
                     "to_phase_signature": str(ph.get("signature", "")),
                     "first20_after_switch": float(cost.head(20).mean()),
+                    "post_calibration_first20_after_switch": float(post_cost.head(20).mean()) if len(post_cost) else np.nan,
                     "first50_after_switch": float(cost.head(50).mean()),
+                    "post_calibration_first50_after_switch": float(post_cost.head(50).mean()) if len(post_cost) else np.nan,
                     "to_phase_last50": phase_last50,
+                    "post_calibration_to_phase_last50": post_phase_last50,
                     "recovery_threshold_105pct_last50": float(threshold),
                     "recovery_time_iter": _first_recovery_iter(cost, threshold),
                     "switching_regret_first50_vs_last50": float(cost.head(50).mean() - phase_last50),
@@ -2422,6 +2458,10 @@ def run_dynamic_scenario_experiments(repeat_runs=1, selected_keys=None, output_d
                 "cbo_state_kernel_rate_sign_veto": bool(getattr(CFG, "CBO_STATE_KERNEL_RATE_SIGN_VETO", True)),
                 "phase_reference_scope": str(getattr(CFG, "PHASE_REFERENCE_SCOPE", "significant_external")),
                 "phase_reference_switch_mode": str(getattr(CFG, "PHASE_REFERENCE_SWITCH_MODE", "dynamic_schedule")),
+                "phase_reference_mode": "phase_triggered_shared_bank",
+                "phase_reference_warmup_rounds": int(getattr(CFG, "PHASE_REFERENCE_WARMUP_ROUNDS", 5)),
+                "phase_reference_freeze_policy": "freeze_within_phase",
+                "phase_reference_reuse_policy": "reuse_when_phase_signature_is_similar",
                 "phase_lambda_rel_threshold": float(getattr(CFG, "PHASE_LAMBDA_REL_THRESHOLD", 0.30)),
                 "phase_task_mix_l1_threshold": float(getattr(CFG, "PHASE_TASK_MIX_L1_THRESHOLD", 0.25)),
                 "phase_deadline_pressure_rel_threshold": float(getattr(CFG, "PHASE_DEADLINE_PRESSURE_REL_THRESHOLD", 0.20)),
