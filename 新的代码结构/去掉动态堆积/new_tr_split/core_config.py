@@ -1,0 +1,1184 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Split from new_TR.py lines 1-819.
+# Global imports, config helpers, ExperimentConfig, CFG initialization, control bounds.
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================
+# v6.2 taskmix/runtime patch: task-mix context modes, short export, per-method runtime logging.
+# ===============================================================
+# 单文件实验版：Reduced6 + BO/EI + BO-greedy + CBO-greedy + CBO-TR-greedy + dual feedback
+# 后续实验只需要运行本文件；不再需要 patch 文件或自动生成脚本。
+# 说明：本文件已合并 SAFE BO + CBO GREEDY + DUAL FEEDBACK PATCH V3。
+# ===============================================================
+
+# ===============================================================
+# 4D BO Anchor + Cohort 反馈测试版
+# 修改点：recommended anchor、Cloud_Gate 收缩范围、tuned fixed 命名、绘图样式不重复
+# 新增：任务批次(cohort)级延迟反馈，用任务完成归因替代窗口即时反馈
+# ===============================================================
+# 约束 Boltzmann + BO 扩展控制版
+# 生成说明：在原“无任务适配 6 维权重版”基础上增加：
+# 1) 可行性候选集 F：CPU / hard deadline / 云门控；
+# 2) 机会集合 O：Opportunity_Rho 控制近优节点范围；
+# 3) BO 扩展控制：W_Queue / W_Risk_Scale / Beta_Control / Opportunity_Rho / Cloud_Gate；
+# 4) 所有新增机制均提供 CFG 开关，便于消融实验。
+# ===============================================================
+
+# ===============================================================
+# Backup no-RoundRobin 500-window runtime defaults (generated 2026-05-21).
+# Base: current server experiment_bo_refactor_v6_taskmix_runtime.py.
+# Embedded runner defaults from current/run_500_bestcbo_direct36.sh:
+# - no RoundRobin in default selected methods
+# - BO_ITERATIONS=500, BO_INTERVAL=240, SESSION_DURATION=120000
+# - feedback_score=task_effective_backlog_violation
+# - BO history mode=recent, BO recent window=80
+# - default output family: v6_500_bestcbo_direct36_norr
+# ===============================================================
+
+import os
+import sys
+import random
+import time
+import collections
+import copy
+import heapq
+import warnings
+import json
+import re
+import numpy as np
+import pandas as pd
+import torch
+import math
+import matplotlib.pyplot as plt
+import matplotlib.font_manager
+from typing import List, Dict, Optional, Any, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+
+from botorch.models import SingleTaskGP
+from botorch.fit import fit_gpytorch_mll
+from gpytorch.mlls import ExactMarginalLogLikelihood
+from botorch.acquisition import LogExpectedImprovement
+from botorch.optim import optimize_acqf
+from botorch.utils.transforms import standardize, normalize, unnormalize
+
+# ===============================================================
+# Refactor v2 notes
+# ---------------------------------------------------------------
+# 目标：把主实验路径整理干净，而不是继续堆新算法。
+# 1) 主线方法固定为 reduced6 fixed candidates + BO-EI + BO-greedy。
+# 2) BO 默认冷启动：不再用 anchor_points 前几轮强制部署固定权重。
+# 3) Eval_Cost（最终系统评价）与 BO_Training_Cost（BO tell 训练反馈）明确分离。
+# 4) feedback 只保留少数清晰模式；dual / cohort 保留为 legacy diagnostic。
+# 5) CBO / TR / 旧 anchor 方法继续保留，但默认不作为主实验方法。
+# ===============================================================
+
+# ===============================================================
+# 代码阅读建议：
+# 1) 先看 ExperimentConfig，理解所有全局参数在控制什么。
+# 2) 再看 ConnectedFactory.run_continuous，这是单轮窗口推进的主流程。
+# 3) 然后看 BoltzmannScheduler.select_node 和 FederatedBOAgent.ask，
+#    前者决定任务落到哪个节点，后者决定下一轮 6 维权重怎么调。
+# ===============================================================
+
+
+def resolve_base_seed(seed: int, stream: int = 0) -> int:
+    """生成可复现实验随机种子。
+
+    seed:    实验主种子。
+    stream:  给不同模块/工厂分配不同随机流，避免彼此串扰。
+    """
+    if CFG.USE_FIXED_RNG:
+        return int(CFG.FIXED_RNG_SEED) + int(seed) * 1009 + int(stream) * 100003
+    return random.SystemRandom().randrange(1, 2 ** 31 - 1)
+
+def _get_node_site_from_cfg(node_cfg, default_site=0):
+    """读取节点所属车间/云位置。普通车间用 0~4，厂区云/区域云用 5/6。"""
+    return int(node_cfg.get("workshop", node_cfg.get("site", default_site)))
+
+
+def _node_is_cloud(node_cfg):
+    role = str(node_cfg.get("role", "")).lower()
+    return bool(node_cfg.get("is_cloud", False)) or ("cloud" in role) or ("remote" in role)
+
+
+def build_topology_matrix(node_count):
+    """构造“车间 + 云节点”基础传输时延矩阵。
+
+    设计思想：
+    - 任务从车间边缘产生；同车间传输最快；
+    - 相邻车间中等；跨车间更慢；
+    - 厂区云/区域云算力强，但基础传输时延更高；
+    - 节点之间不再按 id 单调排序，而是按所属车间/云位置生成拓扑。
+    """
+    # 如果配置里没有车间矩阵，则回退到旧的环形拓扑，保证兼容。
+    if not hasattr(CFG, "WORKSHOP_BASE_DELAY") or not getattr(CFG, "USE_WORKSHOP_TOPOLOGY", True):
+        matrix = [[0.0 for _ in range(node_count)] for _ in range(node_count)]
+        cluster_split = node_count // 2
+        for i in range(node_count):
+            for j in range(node_count):
+                if i == j:
+                    matrix[i][j] = 0.2
+                    continue
+                same_cluster = (i < cluster_split and j < cluster_split) or (i >= cluster_split and j >= cluster_split)
+                ring_dist = min(abs(i - j), node_count - abs(i - j))
+                if ring_dist == 1:
+                    matrix[i][j] = 0.8
+                elif same_cluster:
+                    matrix[i][j] = 1.6 + 0.15 * ring_dist
+                else:
+                    matrix[i][j] = 3.0 + 0.25 * ring_dist
+        return matrix
+
+    site_delay = getattr(CFG, "WORKSHOP_BASE_DELAY")
+    local_access = getattr(CFG, "NODE_ACCESS_DELAY", {})
+    matrix = [[0.0 for _ in range(node_count)] for _ in range(node_count)]
+    for i in range(node_count):
+        src_cfg = CFG.NODES_CFG[i]
+        src_site = _get_node_site_from_cfg(src_cfg, default_site=i // 2)
+        for j in range(node_count):
+            dst_cfg = CFG.NODES_CFG[j]
+            dst_site = _get_node_site_from_cfg(dst_cfg, default_site=j // 2)
+            base = float(site_delay[src_site][dst_site])
+            # 目标节点接入差异：近实时/低功耗边缘稍近，高性能/云节点稍远。
+            role = str(dst_cfg.get("role", "normal_edge"))
+            access = float(local_access.get(role, 0.0))
+            node_prop = float(src_cfg.get("propagation_delay", 0.0)) + float(dst_cfg.get("propagation_delay", 0.0))
+            if i == j:
+                base = min(base, 0.12)
+            matrix[i][j] = max(0.01, base + access + node_prop)
+    return matrix
+
+
+def build_bandwidth_matrix(node_count):
+    """构造节点间带宽矩阵。
+
+    第一版只考虑“不同车间/云位置的带宽差异”，不默认做链路占用。
+    如果后续开启 CFG.USE_LINK_QUEUE，会在 run_continuous 中让同一 origin-destination 链路串行排队。
+    """
+    if not hasattr(CFG, "WORKSHOP_BW") or not getattr(CFG, "USE_WORKSHOP_TOPOLOGY", True):
+        return [[float(getattr(CFG, "LINK_BW", 50.0)) for _ in range(node_count)] for _ in range(node_count)]
+    site_bw = getattr(CFG, "WORKSHOP_BW")
+    matrix = [[0.0 for _ in range(node_count)] for _ in range(node_count)]
+    for i in range(node_count):
+        src_site = _get_node_site_from_cfg(CFG.NODES_CFG[i], default_site=i // 2)
+        for j in range(node_count):
+            dst_site = _get_node_site_from_cfg(CFG.NODES_CFG[j], default_site=j // 2)
+            src_cfg = CFG.NODES_CFG[i]
+            dst_cfg = CFG.NODES_CFG[j]
+            link_bw = float(site_bw[src_site][dst_site])
+            src_uplink = float(src_cfg.get("uplink_bandwidth", link_bw))
+            dst_downlink = float(dst_cfg.get("downlink_bandwidth", link_bw))
+            matrix[i][j] = max(1e-6, min(link_bw, src_uplink, dst_downlink))
+    return matrix
+
+
+def get_node_capacity_slots(node_cfg):
+    """Return abstract concurrent capacity slots, not physical CPU cores."""
+    return int(node_cfg.get("capacity_slots", node_cfg.get("cpu", node_cfg.get("num_cores", 1))))
+
+
+def get_node_task_affinity_factor(node_cfg, task_type=None):
+    """Return A_j,k, the environment-defined task-node affinity factor.
+
+    The preferred field is task_node_affinity_factor. Older experiment files
+    may still contain accel_factor/type_speed_factor; those are compatibility
+    aliases and are not CBO-only mechanisms.
+    """
+    if task_type is None:
+        return 1.0
+    factors = (
+        node_cfg.get("task_node_affinity_factor")
+        or node_cfg.get("task_specific_service_factor")
+        or node_cfg.get("accel_factor")
+        or node_cfg.get("type_speed_factor")
+        or {}
+    )
+    return float(factors.get(task_type, 1.0))
+
+
+def get_node_service_rate(node_cfg, task_type=None):
+    """Return effective service rate in cycles/s.
+
+    service_rate_gips is the preferred field. The legacy speed field is kept
+    only as a compatibility alias and must not be interpreted as CPU GHz.
+    """
+    if "service_rate_gips" in node_cfg:
+        base_rate = float(node_cfg.get("service_rate_gips", 1.0)) * 1e9
+    elif "service_rate_mips" in node_cfg:
+        base_rate = float(node_cfg.get("service_rate_mips", 1000.0)) * 1e6
+    elif "mips_per_core" in node_cfg:
+        cores = max(1.0, float(node_cfg.get("num_cores", get_node_capacity_slots(node_cfg))))
+        base_rate = float(node_cfg.get("mips_per_core", 1000.0)) * cores * 1e6
+    else:
+        base_rate = float(node_cfg.get("speed", 1.0)) * 1e9
+
+    if _node_is_cloud(node_cfg):
+        base_rate *= float(getattr(CFG, "CLOUD_SERVICE_RATE_MULT", getattr(CFG, "CLOUD_SPEED_MULT", 1.0)))
+
+    try:
+        use_adaptation = bool(getattr(CFG, "USE_TASK_TYPE_ADAPTATION", False))
+    except NameError:
+        use_adaptation = False
+    if not use_adaptation or task_type is None:
+        return base_rate
+
+    return base_rate * get_node_task_affinity_factor(node_cfg, task_type)
+
+
+def get_effective_speed(node_cfg, task_type):
+    """Compatibility wrapper for older scheduler code."""
+    return get_node_service_rate(node_cfg, task_type)
+
+
+def get_node_idle_power(node_cfg):
+    return float(node_cfg.get("idle_power", node_cfg.get("p_idle", 0.0)))
+
+
+def get_node_max_power(node_cfg):
+    return float(node_cfg.get("max_power", node_cfg.get("p_max", get_node_idle_power(node_cfg))))
+
+
+def get_reserved_slots(node_cfg, task_type="RT"):
+    reserved = node_cfg.get("reserved_resource", {}) or {}
+    if isinstance(reserved, (int, float)):
+        return int(max(0.0, float(reserved)))
+    return int(max(0.0, float(reserved.get(task_type, 0.0))))
+
+
+def get_task_upload_size(props):
+    return float(props.get("upload_size", props.get("data", 0.0)))
+
+
+def get_task_download_size(props):
+    return float(props.get("download_size", 0.0))
+
+
+def get_task_total_data_size(props):
+    if "data" in props:
+        return float(props.get("data", 0.0))
+    return get_task_upload_size(props) + get_task_download_size(props)
+
+
+def get_task_required_cores(props):
+    return int(props.get("required_cores", props.get("cpu", 1)))
+
+
+def get_task_memory_demand(props):
+    return float(props.get("memory_demand", props.get("memory_gb", props.get("mem", 0.0))))
+
+
+def get_task_workload_cycles(props):
+    if "workload_cycles" in props:
+        return float(props.get("workload_cycles", 0.0))
+    return float(props.get("dur", 1.0)) * float(getattr(CFG, "TASK_CYCLE_RATE_REFERENCE", 4.5e9))
+
+
+def get_task_duration_reference(props):
+    if "duration_base" in props:
+        return float(props.get("duration_base", 0.0))
+    if "dur" in props:
+        return float(props.get("dur", 0.0))
+    return get_task_workload_cycles(props) / max(float(getattr(CFG, "TASK_CYCLE_RATE_REFERENCE", 4.5e9)), 1e-9)
+
+
+def get_task_deadline_budget(props):
+    return float(props.get("deadline", get_task_duration_reference(props) * float(props.get("deadline_factor", 1.0))))
+
+
+def get_task_delay_sensitivity(props):
+    return float(props.get("delay_sensitivity", 1.0))
+
+
+def build_task_kwargs_from_props(task_type, props, create_time, origin_node_id=-1):
+    cycles = get_task_workload_cycles(props)
+    duration_ref = get_task_duration_reference(props)
+    deadline_budget = get_task_deadline_budget(props)
+    upload = get_task_upload_size(props)
+    download = get_task_download_size(props)
+    return {
+        "create_time": float(create_time),
+        "upload_size": upload,
+        "download_size": download,
+        "workload_cycles": cycles,
+        "required_cores": get_task_required_cores(props),
+        "memory_demand": get_task_memory_demand(props),
+        "deadline": float(create_time) + deadline_budget,
+        "delay_sensitivity": get_task_delay_sensitivity(props),
+        "task_type": task_type,
+        "arrival_time": float(create_time),
+        # Legacy aliases used by older diagnostics/schedulers.
+        "data_size": upload + download,
+        "cpu_req": get_task_required_cores(props),
+        "duration_base": duration_ref,
+        "deadline_factor": deadline_budget / max(duration_ref, 1e-9),
+        "origin_node_id": int(origin_node_id),
+    }
+
+
+def get_transmission_delay(origin_node_idx, target_node_idx, data_size, include_local=True, direction="upload"):
+    """Transmission delay = propagation + data / bandwidth + access delay."""
+    if float(data_size) <= 0.0:
+        return 0.0
+    origin_node_idx = int(origin_node_idx) if origin_node_idx is not None and origin_node_idx >= 0 else int(target_node_idx)
+    target_node_idx = int(target_node_idx)
+    base = float(CFG.TRANS_DELAY_MATRIX[origin_node_idx][target_node_idx])
+    bw = float(CFG.TRANS_BW_MATRIX[origin_node_idx][target_node_idx]) if hasattr(CFG, "TRANS_BW_MATRIX") else float(CFG.LINK_BW)
+    delay = base + float(data_size) / (bw + 1e-9)
+    if _node_is_cloud(CFG.NODES_CFG[origin_node_idx]) or _node_is_cloud(CFG.NODES_CFG[target_node_idx]):
+        delay *= float(getattr(CFG, "CLOUD_DELAY_MULT", 1.0))
+    if include_local:
+        if str(direction).lower() == "download":
+            delay += float(getattr(CFG, "LOCAL_DOWNLOAD_DELAY", 0.0))
+        else:
+            delay += float(getattr(CFG, "LOCAL_UPLOAD_DELAY", 0.0))
+    return max(0.0, delay)
+
+
+def get_transmission_energy(origin_node_idx, target_node_idx, data_size):
+    """传输能耗：数据量 × 单位传输能耗 × 距离/链路类型系数。
+
+    这是第一版轻量模型，不做链路功率积分；好处是简单、稳定、能体现跨车间/上云更耗能。
+    """
+    if float(data_size) <= 0.0:
+        return 0.0
+    origin_node_idx = int(origin_node_idx) if origin_node_idx is not None and origin_node_idx >= 0 else int(target_node_idx)
+    target_node_idx = int(target_node_idx)
+    src_site = _get_node_site_from_cfg(CFG.NODES_CFG[origin_node_idx], default_site=origin_node_idx // 2)
+    dst_site = _get_node_site_from_cfg(CFG.NODES_CFG[target_node_idx], default_site=target_node_idx // 2)
+    factor_matrix = getattr(CFG, "WORKSHOP_TRANS_ENERGY_FACTOR", None)
+    if factor_matrix is not None:
+        factor = float(factor_matrix[src_site][dst_site])
+    else:
+        factor = 1.0 + 0.25 * float(CFG.TRANS_DELAY_MATRIX[origin_node_idx][target_node_idx])
+    energy = float(getattr(CFG, "P_TRANS", 0.5)) * float(data_size) * factor
+    if _node_is_cloud(CFG.NODES_CFG[origin_node_idx]) or _node_is_cloud(CFG.NODES_CFG[target_node_idx]):
+        energy *= float(getattr(CFG, "CLOUD_ENERGY_MULT", 1.0))
+    return energy
+
+
+def _normalize_task_probs(probs):
+    """把任务类型概率整理为 RT / Batch / AI 三类，自动归一化。"""
+    out = {"RT": 0.0, "Batch": 0.0, "AI": 0.0}
+    if isinstance(probs, dict):
+        for k, v in probs.items():
+            kk = str(k).strip()
+            if kk.lower() in {"rt", "real", "realtime", "real_time"}:
+                out["RT"] = float(v)
+            elif kk.lower() in {"batch", "bat"}:
+                out["Batch"] = float(v)
+            elif kk.lower() in {"ai", "ml"}:
+                out["AI"] = float(v)
+    elif isinstance(probs, (list, tuple, np.ndarray)) and len(probs) >= 3:
+        out = {"RT": float(probs[0]), "Batch": float(probs[1]), "AI": float(probs[2])}
+    total = sum(max(0.0, float(v)) for v in out.values())
+    if total <= 0:
+        return {"RT": 0.1, "Batch": 0.4, "AI": 0.5}
+    return {k: max(0.0, float(v)) / total for k, v in out.items()}
+
+
+def get_task_type_probs_at_time(current_time=None):
+    """读取当前时间对应的任务类型比例。
+
+    默认使用 CFG.TASK_TYPE_PROBS；若设置了 CFG.TASK_TYPE_PROB_SCHEDULE，
+    则按 (start, end, probs) 分段使用不同任务比例。
+    """
+    schedule = getattr(CFG, "TASK_TYPE_PROB_SCHEDULE", None)
+    if current_time is not None and schedule:
+        t = float(current_time)
+        for item in schedule:
+            if len(item) != 3:
+                continue
+            start, end, probs = item
+            if float(start) <= t < float(end):
+                return _normalize_task_probs(probs)
+    return _normalize_task_probs(getattr(CFG, "TASK_TYPE_PROBS", {"RT": 0.1, "Batch": 0.4, "AI": 0.5}))
+
+
+def sample_task_type(rng, current_time=None):
+    """按当前阶段的任务类型概率从 RT / Batch / AI 中采样。"""
+    probs = get_task_type_probs_at_time(current_time)
+    r = rng.random()
+    cum = 0.0
+    for t_type in TASK_TYPE_ORDER:
+        cum += float(probs.get(t_type, 0.0))
+        if r <= cum:
+            return t_type
+    return "Batch"
+
+TASK_TYPE_ORDER = ["RT", "Batch", "AI"]
+
+
+def normalize_theta_vector(theta, dim=None, fill=1.0):
+    """把权重向量整理成固定维度。
+
+    当前实验默认是 6 维：
+    [RT时延, Batch时延, AI时延, RT能耗, Batch能耗, AI能耗]
+    """
+    dim = CFG.DIM_THETA if dim is None else int(dim)
+    if theta is None:
+        return [float(fill)] * dim
+    if isinstance(theta, torch.Tensor):
+        theta = theta.detach().cpu().view(-1).tolist()
+    elif not isinstance(theta, (list, tuple, np.ndarray)):
+        theta = [theta]
+    theta = [float(x) for x in theta]
+    if len(theta) < dim:
+        theta = theta + [float(fill)] * (dim - len(theta))
+    return theta[:dim]
+
+
+def split_task_weights(theta_full):
+    """把 theta 前 6 维拆成“分任务类型的时延权重”和“能耗权重”。
+
+    扩展 BO 维度不会改变前 6 维语义：
+    [RT时延, Batch时延, AI时延, RT能耗, Batch能耗, AI能耗, ...]
+    """
+    dim = max(6, int(getattr(CFG, "DIM_THETA", 6)))
+    theta = normalize_theta_vector(theta_full, dim=dim)
+    latency_weights = {t: float(theta[i]) for i, t in enumerate(TASK_TYPE_ORDER)}
+    energy_weights = {t: float(theta[i + 3]) for i, t in enumerate(TASK_TYPE_ORDER)}
+    return latency_weights, energy_weights, theta
+
+
+def theta_to_named_dict(theta):
+    """把 theta 转成带名字的字典，便于导出 CSV 和看结果。"""
+    theta = normalize_theta_vector(theta)
+    return {CFG.FEATURE_NAMES[i]: theta[i] for i in range(min(CFG.DIM_THETA, len(theta)))}
+
+
+def _extended_control_defaults_by_name():
+    """扩展 BO 控制维度的默认值。"""
+    return {
+        "W_Queue": float(getattr(CFG, "QUEUE_WEIGHT_DEFAULT", 1.0)),
+        "W_Risk_Scale": float(getattr(CFG, "RISK_SCALE_DEFAULT", 1.0)),
+        "Beta_Control": float(getattr(CFG, "BETA_DEFAULT", getattr(CFG, "BETA_INITIAL", 3.0))),
+        "Opportunity_Rho": float(getattr(CFG, "OPPORTUNITY_RHO_DEFAULT", 1.0)),
+        "Cloud_Gate": float(getattr(CFG, "CLOUD_GATE_DEFAULT", 0.50)),
+    }
+
+
+def extend_control_point(base_theta):
+    """把原始 6 维权重扩展到当前 CFG.DIM_THETA。"""
+    vals = list(base_theta)
+    if not hasattr(CFG, "FEATURE_NAMES"):
+        return vals
+    defaults = _extended_control_defaults_by_name()
+    for name in list(CFG.FEATURE_NAMES)[len(vals):]:
+        vals.append(float(defaults.get(name, 1.0)))
+    return vals[:int(CFG.DIM_THETA)]
+
+
+def default_control_vector(fill=1.5):
+    """生成当前控制维度下的默认 theta。"""
+    base = [float(fill)] * min(6, int(getattr(CFG, "DIM_THETA", 6)))
+    return extend_control_point(base)
+
+
+def default_scenario_anchor_points():
+    """情景 BO 前几轮使用的引导点。开启扩展控制时会自动补齐后 5 维。"""
+    base_points = [
+        [1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
+        [2.5, 1.2, 1.4, 0.8, 2.2, 1.8],
+        [1.2, 1.4, 1.3, 2.6, 2.4, 2.2],
+    ]
+    return [extend_control_point(p) for p in base_points]
+
+def infer_arrival_thresholds(lambda_schedule):
+    """根据当前 LAMBDA_SCHEDULE 自动推断 arrival state 的 LOW/MID/HIGH 阈值。
+
+    这样切换到不同到达率配置时，不需要手动同步修改 ARRIVAL_THRESHOLDS。
+    对三段负载 [a, b, c]，返回 ((a+b)/2, (b+c)/2)。
+    """
+    lambdas = sorted({float(lam) for _, _, lam in lambda_schedule if float(lam) > 0})
+    if len(lambdas) >= 3:
+        return ((lambdas[0] + lambdas[1]) / 2.0, (lambdas[1] + lambdas[2]) / 2.0)
+    if len(lambdas) == 2:
+        low = (lambdas[0] + lambdas[1]) / 2.0
+        high = lambdas[1] * 1.05
+        return (low, high)
+    if len(lambdas) == 1:
+        return (0.8 * lambdas[0], 1.2 * lambdas[0])
+    return (1.0, 2.0)
+
+# ==========================================
+# 1. 配置模块 (Config)
+# ==========================================
+class ExperimentConfig:
+    """全局实验配置。
+
+    你最需要先读懂这一段：这里定义了仿真时长、任务到达过程、
+    节点能力、BO 搜索范围、情景信息、代价函数系数等。
+    """
+    SESSION_DURATION = 120000.0  # 备份版默认：500 * 240 秒；单次连续仿真的总时长（单位：秒）
+    BO_ITERATIONS = 500  # 备份版默认：runner 中 ITERATIONS=500；BO 外层优化总轮数
+    TASKS_PER_BATCH = 100  # 批模式下每批生成的任务数（当前主流程基本不用批模式）
+    BO_INTERVAL = 240.0  # 备份版默认：runner 中 BO_INTERVAL=240；每轮 BO 对应的窗口长度
+    SCENARIO_INTERVAL = 20.0  # 多久重新判定一次离散情景状态（LOW/MID/HIGH）
+    SCENARIO_WINDOW = 60.0  # 统计情景指标时看的滑动时间窗长度
+    SCENARIO_STABLE_K = 3  # 连续多少次判定到相同 state，才认为情景稳定
+
+    # 分段泊松到达率：不同时间段任务到达强度不同，用来制造动态环境。
+    # 主实验不再把“固定 RT/Batch/AI 比例”本身当作动态性证据；
+    # 动态性来自到达强度、任务比例、链路/资源等随时间变化的阶段。
+    LAMBDA_SCHEDULE = [
+        (0.0, 40000.0, 1.0),
+        (40000.0, 80000.0, 1.8),
+        (80000.0, 120000.0, 1.2),
+    ]
+     #(1000.0, 2000.0, 1.8),
+      ##(3000.0, 4000.0, 1.0),
+       #(4000.0, 5000.0, 1.8),
+       #(5000.0, 6000.0, 2.6),
+       #(6000.0, 7000.0, 1.0),
+       #(7000.0, 8000.0, 1.8),
+       #(8000.0, 9000.0, 2.6),
+       #(9000.0, 10000.0, 1.0),
+       #(10000.0, 11000.0, 1.8),
+       #(11000.0, 12000.0, 2.6)]
+    BATCH_POISSON_LAMBDA = 1.5  # 批模式的泊松到达率
+    TASK_TYPE_PROBS = {"RT": 0.1, "Batch": 0.40, "AI": 0.50}  # 三类任务的生成概率
+
+    # Task profile fields follow a MEC-style model:
+    # upload_size / download_size: input and result data sizes
+    # workload_cycles: compute demand in cycles
+    # required_cores: abstract concurrent resource slots needed by the task
+    # deadline: relative SLA budget in seconds; Task.deadline stores absolute time
+    # delay_sensitivity: diagnostic/weighting metadata for task criticality
+    TASK_CYCLE_RATE_REFERENCE = 4.5e9
+    TASK_PROPS = {
+        "RT": {
+            "upload_size": 8.0, "download_size": 2.0,
+            "workload_cycles": 13.5e9, "required_cores": 4, "memory_demand": 2.0,
+            "deadline": 6.0, "delay_sensitivity": 1.0, "task_type": "RT",
+        },
+        "Batch": {
+            "upload_size": 70.0, "download_size": 10.0,
+            "workload_cycles": 67.5e9, "required_cores": 12, "memory_demand": 8.0,
+            "deadline": 300.0, "delay_sensitivity": 0.2, "task_type": "Batch",
+        },
+        "AI": {
+            "upload_size": 150.0, "download_size": 10.0,
+            "workload_cycles": 90.0e9, "required_cores": 20, "memory_demand": 16.0,
+            "deadline": 300.0, "delay_sensitivity": 0.5, "task_type": "AI",
+        },
+    }
+
+    # 2. 增加延迟的惩罚权重：让 BO 不敢随便降频
+    # 如果能量是 5000，延迟是 50，我们把 ALPHA_LATENCY 设为 100.0，
+    # 这样迟到带来的惩罚 (5000分) 就和能耗 (5000分) 五五开了！
+    ALPHA_LATENCY = 100.0  # 代价函数里“平均时延”的惩罚强度
+
+    # 动态维度：每个节点 4 个比例（RT: CPU/BW，Batch: CPU/BW）
+    # 在定义完 NODES_CFG 后计算
+
+    # 节点配置：多车间边缘节点 + 两级云节点。
+    # workshop/site: 0~4 表示五个车间；5 表示厂区云；6 表示区域云。
+    # role: 用于生成接入时延修正、功耗策略和后续诊断。
+    # 是否启用“任务类型适配”。
+    # False: RT / Batch / AI all use the base service_rate_gips.
+    # True: use the shared task_node_affinity_factor matrix as environment
+    # heterogeneity. All baselines and CBO see the same matrix.
+    USE_TASK_TYPE_ADAPTATION = True
+
+    # Node fields use abstract service/resource-pool semantics. capacity_slots
+    # are concurrent scheduling slots/VM-pool units, while num_cores is only
+    # descriptive. service_rate_gips is Gcycles/s, not CPU GHz.
+    # task_node_affinity_factor is a shared environment matrix A_j,k, not a
+    # CBO-specific accelerator trick. Use --no-task-adaptation for ablation.
+    NODES_CFG = [
+        {"id": 0, "node_type": "rt_edge", "workshop": 0, "role": "rt_edge", "num_cores": 16, "capacity_slots": 56,
+         "service_rate_gips": 3.7, "idle_power": 85, "max_power": 380,
+         "memory_gb": 64,
+         "uplink_bandwidth": 120.0, "downlink_bandwidth": 120.0, "propagation_delay": 0.00,
+         "accelerator_type": "rt_reserved_edge", "reserved_resource": {"RT": 8},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.90, "AI": 0.65}},
+        {"id": 1, "node_type": "edge", "workshop": 0, "role": "low_power", "num_cores": 8, "capacity_slots": 44,
+         "service_rate_gips": 2.9, "idle_power": 45, "max_power": 210,
+         "memory_gb": 48,
+         "uplink_bandwidth": 95.0, "downlink_bandwidth": 95.0, "propagation_delay": 0.01,
+         "accelerator_type": "none", "reserved_resource": {"RT": 4},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.85, "AI": 0.55}},
+
+        {"id": 2, "node_type": "fog", "workshop": 1, "role": "efficient", "num_cores": 20, "capacity_slots": 72,
+         "service_rate_gips": 4.4, "idle_power": 115, "max_power": 500,
+         "memory_gb": 96,
+         "uplink_bandwidth": 110.0, "downlink_bandwidth": 110.0, "propagation_delay": 0.02,
+         "accelerator_type": "batch_parallel_cpu", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.20, "AI": 1.00}},
+        {"id": 3, "node_type": "edge", "workshop": 1, "role": "normal_edge", "num_cores": 12, "capacity_slots": 52,
+         "service_rate_gips": 3.4, "idle_power": 70, "max_power": 320,
+         "memory_gb": 64,
+         "uplink_bandwidth": 100.0, "downlink_bandwidth": 100.0, "propagation_delay": 0.02,
+         "accelerator_type": "none", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.00, "AI": 0.85}},
+
+        {"id": 4, "node_type": "ai_accel", "workshop": 2, "role": "ai_accel", "num_cores": 24, "capacity_slots": 88,
+         "service_rate_gips": 5.0, "idle_power": 210, "max_power": 850,
+         "memory_gb": 192,
+         "uplink_bandwidth": 90.0, "downlink_bandwidth": 100.0, "propagation_delay": 0.05,
+         "accelerator_type": "gpu_npu_pool", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.00, "AI": 1.85}},
+        {"id": 5, "node_type": "edge", "workshop": 2, "role": "normal_edge", "num_cores": 12, "capacity_slots": 54,
+         "service_rate_gips": 3.5, "idle_power": 78, "max_power": 340,
+         "memory_gb": 64,
+         "uplink_bandwidth": 105.0, "downlink_bandwidth": 105.0, "propagation_delay": 0.02,
+         "accelerator_type": "none", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.00, "AI": 0.90}},
+
+        {"id": 6, "node_type": "edge", "workshop": 3, "role": "low_power", "num_cores": 8, "capacity_slots": 40,
+         "service_rate_gips": 2.6, "idle_power": 32, "max_power": 165,
+         "memory_gb": 40,
+         "uplink_bandwidth": 80.0, "downlink_bandwidth": 80.0, "propagation_delay": 0.01,
+         "accelerator_type": "none", "reserved_resource": {"RT": 3},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.75, "AI": 0.50}},
+        {"id": 7, "node_type": "fog", "workshop": 3, "role": "batch_node", "num_cores": 24, "capacity_slots": 68,
+         "service_rate_gips": 3.9, "idle_power": 105, "max_power": 430,
+         "memory_gb": 96,
+         "uplink_bandwidth": 115.0, "downlink_bandwidth": 115.0, "propagation_delay": 0.03,
+         "accelerator_type": "batch_parallel_cpu", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.45, "AI": 0.90}},
+
+        {"id": 8, "node_type": "fog", "workshop": 4, "role": "high_perf", "num_cores": 32, "capacity_slots": 96,
+         "service_rate_gips": 5.5, "idle_power": 235, "max_power": 940,
+         "memory_gb": 160,
+         "uplink_bandwidth": 130.0, "downlink_bandwidth": 130.0, "propagation_delay": 0.06,
+         "accelerator_type": "edge_server_pool", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.10, "AI": 1.20}},
+        {"id": 9, "node_type": "edge", "workshop": 4, "role": "backup_low", "num_cores": 8, "capacity_slots": 36,
+         "service_rate_gips": 2.4, "idle_power": 24, "max_power": 140,
+         "memory_gb": 32,
+         "uplink_bandwidth": 75.0, "downlink_bandwidth": 75.0, "propagation_delay": 0.01,
+         "accelerator_type": "none", "reserved_resource": {"RT": 2},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 0.65, "AI": 0.45}},
+
+        {"id": 10, "node_type": "cloud", "workshop": 5, "role": "factory_cloud", "is_cloud": True,
+         "num_cores": 64, "capacity_slots": 128, "service_rate_gips": 6.2,
+         "idle_power": 320, "max_power": 1350, "memory_gb": 384,
+         "uplink_bandwidth": 160.0, "downlink_bandwidth": 160.0,
+         "propagation_delay": 0.12, "accelerator_type": "vm_pool_gpu_optional", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.35, "AI": 1.55}},
+        {"id": 11, "node_type": "cloud", "workshop": 6, "role": "regional_cloud", "is_cloud": True,
+         "num_cores": 96, "capacity_slots": 192, "service_rate_gips": 7.0,
+         "idle_power": 480, "max_power": 2100, "memory_gb": 768,
+         "uplink_bandwidth": 220.0, "downlink_bandwidth": 220.0,
+         "propagation_delay": 0.18, "accelerator_type": "regional_vm_gpu_pool", "reserved_resource": {"RT": 0},
+         "task_node_affinity_factor": {"RT": 1.00, "Batch": 1.60, "AI": 2.10}},
+    ]
+    # ===========================================================
+    # BO 控制向量设置
+    # ===========================================================
+    # False：保持原始 6 维控制向量；True：扩展为 11 维。
+    USE_EXTENDED_BO_CONTROL = True
+    BASE_FEATURE_NAMES = [
+        "W_RT_Latency", "W_Batch_Latency", "W_AI_Latency",
+        "W_RT_Energy", "W_Batch_Energy", "W_AI_Energy"
+    ]
+    EXTENDED_FEATURE_NAMES = [
+        "W_Queue",          # 队列/拥塞压力权重
+        "W_Risk_Scale",     # deadline risk 缩放系数
+        "Beta_Control",     # Boltzmann 反温度，越大越贪心
+        "Opportunity_Rho",  # 机会窗口，控制近优候选节点范围
+        "Cloud_Gate"        # 云卸载门控阈值
+    ]
+    FEATURE_NAMES = BASE_FEATURE_NAMES + EXTENDED_FEATURE_NAMES if USE_EXTENDED_BO_CONTROL else BASE_FEATURE_NAMES
+    DIM_THETA = len(FEATURE_NAMES)
+    # deadline risk 作为“软安全项”，不是硬筛选规则。
+    # 改成 soft deadline pressure 后，risk 会更频繁出现，因此默认权重调低。
+    TASK_RISK_WEIGHTS = {"RT": 3.0, "Batch": 0.3, "AI": 0.8}  # 不同任务类型对违约风险的敏感度
+    USE_SCORE_RISK = True  # 是否在节点 score 中加入 deadline risk；False 表示纯时延+能耗调度
+    USE_DEADLINE_FILTER = False  # 旧版 hard deadline 开关；新版本建议使用下面的统一可行性筛选
+
+    # ===========================================================
+    # 约束 Boltzmann 调度开关：随机性只发生在“可行 + 近优”节点中
+    # ===========================================================
+    USE_CONSTRAINED_BOLTZMANN = True
+    USE_BOLTZMANN_RANDOM = True       # False：机会集合内直接选最小 score，作为贪心消融
+    USE_FEASIBILITY_FILTER = True
+    USE_HARD_CPU_FILTER = True
+    USE_HARD_DEADLINE_FILTER = True
+    HARD_DEADLINE_TASKS = {"RT": True, "Batch": False, "AI": False}
+    HARD_DEADLINE_FALLBACK = "min_violation"  # min_violation / relax_deadline
+    USE_SAFETY_MARGIN_FILTER = True
+    SAFETY_MARGIN_FACTOR = {"RT": 0.20, "Batch": 0.05, "AI": 0.05}
+    SAFETY_MARGIN_SCALE_DEFAULT = 1.0
+
+    USE_QUEUE_PRESSURE_SCORE = True
+    QUEUE_PRESSURE_CLIP = 3.0
+    QUEUE_WEIGHT_DEFAULT = 1.0
+    USE_BO_QUEUE_WEIGHT = True
+
+    # Scheduler node-score tradeoff. Defaults preserve the old linear score.
+    SCHEDULER_TRADEOFF_MODE = "legacy"  # legacy / alpha_fixed / alpha_from_ratio / alpha_direct
+    SCHEDULER_TRADEOFF_ALPHA = 0.85
+    SCHEDULER_ALPHA_MIN = 0.60
+    SCHEDULER_ALPHA_MAX = 0.97
+    SCHEDULER_LE_SCALE = 1.0
+    ALPHA_DIRECT_BOUNDS = None
+    ALPHA_DIRECT_RT_BOUNDS = (0.70, 0.98)
+    ALPHA_DIRECT_BATCH_BOUNDS = (0.50, 0.90)
+    ALPHA_DIRECT_AI_BOUNDS = (0.50, 0.95)
+    ALPHA_DIRECT_FIXED_THETA = None
+    REDUCED7_ENERGY_SCALE_BOUNDS = None
+    SCHEDULER_SERVICE_LATENCY_WEIGHT = 1.0
+    SCHEDULER_SERVICE_RISK_WEIGHT = 1.0
+    SCHEDULER_SERVICE_QUEUE_WEIGHT = 1.0
+    SCHEDULER_ENERGY_WEIGHT = 1.0
+
+    # Scheduler score normalization. candidate_minmax_deadline is the main
+    # per-task candidate-set normalization required by the dynamic scheduler.
+    SCHEDULER_SCORE_NORM_MODE = "candidate_minmax_deadline"  # candidate_minmax_deadline / legacy / candidate_median / candidate_iqr / rolling_ema
+    SCHEDULER_NORM_CLIP_MAX = 3.0
+    SCHEDULER_NORM_EPS = 1e-6
+    SCHEDULER_NORM_EMA_ALPHA = 0.995
+    USE_CLOUD_SCORE_PENALTY = True
+    CLOUD_NODE_PENALTY_WEIGHT = 0.05
+    DIRECT_HEURISTIC_USE_CANDIDATE_NORM = True
+
+    # Keep BO low-dimensional: BO learns one queue weight, then each task
+    # type applies a fixed base sensitivity.
+    QUEUE_BASE_WEIGHTS = {"RT": 1.5, "Batch": 0.5, "AI": 1.0}
+
+    # Risk is primarily handled by deadline feasibility filtering. In normal
+    # feasible choices it acts as a weak tie-breaker; when deadline filtering
+    # falls back to a violation candidate, the full risk penalty is restored.
+    SCHEDULER_RISK_SCORE_MODE = "fallback_tiebreak"  # legacy_main / fallback_tiebreak / off
+    SCHEDULER_RISK_TIEBREAKER_SCALE = 0.10
+    SCHEDULER_RISK_FALLBACK_SCALE = 1.00
+
+    RISK_SCALE_DEFAULT = 1.0
+    USE_BO_RISK_SCALE = True
+    BETA_DEFAULT = 3.0  # 与 BETA_INITIAL 保持一致；由于类属性定义顺序，不能在此直接引用 BETA_INITIAL
+    USE_BO_BETA_CONTROL = True
+
+    OPPORTUNITY_RHO_DEFAULT = 1.0
+    USE_BO_OPPORTUNITY_RHO = True
+    USE_OPPORTUNITY_WINDOW = True
+    OPPORTUNITY_MODE = "std"          # std: min + rho * std(score); absolute: min + rho
+    OPPORTUNITY_ABS_FLOOR = 1e-6
+    OPPORTUNITY_MIN_CANDIDATES = 2
+
+    USE_CLOUD_GATE = True
+    USE_BO_CLOUD_GATE = True
+    CLOUD_GATE_DEFAULT = 0.50
+    CLOUD_GATE_ALLOW_TASKS = {"RT": False, "Batch": True, "AI": True}
+    CLOUD_GATE_ALWAYS_ALLOW_IF_NO_EDGE_FEASIBLE = True
+    CLOUD_GATE_PRESSURE_UTIL_WEIGHT = 0.70
+    CLOUD_GATE_PRESSURE_BACKLOG_WEIGHT = 0.30
+    CLOUD_GATE_BACKLOG_NORM = 24.0
+
+    RISK_CLIP_MAX = 3.0  # soft risk 的截断上限，避免 risk 压过所有其他项
+    RISK_MARGIN_FACTOR = {"RT": 1.0, "Batch": 0.3, "AI": 0.3}  # 多接近 deadline 才开始产生 pressure
+
+    K_CPU = 1e-28  # Legacy coefficient kept for compatibility; main energy uses power-time integration.
+    P_TRANS = 0.5  # 单位数据传输能耗系数
+    BETA_INITIAL = 3.0  # Boltzmann 选择温度的反比参数；越大越偏向低分节点
+    BETA_TRAINABLE = False  # 是否在线调整 beta；当前默认关闭
+    BETA_DELTA = 0.0  # 如果允许训练 beta，每次更新的步长
+    # 联邦云端评分权重（用于 mu + beta_cloud * sigma）
+    FED_BETA = 3.0  # 联邦聚合时的探索强度，score = mu_fed + FED_BETA * sigma_fed
+
+    # 任务源只从 5 个车间产生，不直接从云节点产生；每个车间内随机落到本地边缘入口节点。
+    USE_WORKSHOP_ORIGIN = True
+    WORKSHOP_ORIGIN_BIAS = [0.24, 0.22, 0.20, 0.18, 0.16]
+    ORIGIN_BIAS = [0.12, 0.12, 0.11, 0.11, 0.10, 0.10, 0.09, 0.09, 0.08, 0.08]  # 兼容旧入口：仅对应 0~9 车间边缘节点
+
+    # 车间/云拓扑。0~4 是车间，5 是厂区云，6 是区域云。
+    USE_WORKSHOP_TOPOLOGY = True
+    WORKSHOP_BASE_DELAY = [
+        [0.16, 0.90, 1.60, 1.10, 1.90, 2.20, 4.00],
+        [0.90, 0.16, 0.90, 1.35, 1.10, 1.90, 3.70],
+        [1.60, 0.90, 0.16, 2.00, 1.25, 1.60, 3.40],
+        [1.10, 1.35, 2.00, 0.16, 0.90, 2.10, 3.90],
+        [1.90, 1.10, 1.25, 0.90, 0.16, 1.70, 3.60],
+        [2.20, 1.90, 1.60, 2.10, 1.70, 0.30, 2.40],
+        [4.00, 3.70, 3.40, 3.90, 3.60, 2.40, 0.50],
+    ]
+    WORKSHOP_BW = [
+        [120.0, 65.0, 38.0, 58.0, 32.0, 45.0, 24.0],
+        [65.0, 120.0, 65.0, 46.0, 58.0, 52.0, 26.0],
+        [38.0, 65.0, 120.0, 34.0, 52.0, 60.0, 30.0],
+        [58.0, 46.0, 34.0, 120.0, 65.0, 48.0, 25.0],
+        [32.0, 58.0, 52.0, 65.0, 120.0, 56.0, 28.0],
+        [45.0, 52.0, 60.0, 48.0, 56.0, 160.0, 70.0],
+        [24.0, 26.0, 30.0, 25.0, 28.0, 70.0, 220.0],
+    ]
+    WORKSHOP_TRANS_ENERGY_FACTOR = [
+        [1.00, 1.25, 1.55, 1.35, 1.70, 1.95, 2.60],
+        [1.25, 1.00, 1.25, 1.45, 1.35, 1.80, 2.45],
+        [1.55, 1.25, 1.00, 1.75, 1.40, 1.65, 2.35],
+        [1.35, 1.45, 1.75, 1.00, 1.25, 1.90, 2.55],
+        [1.70, 1.35, 1.40, 1.25, 1.00, 1.75, 2.40],
+        [1.95, 1.80, 1.65, 1.90, 1.75, 1.00, 1.70],
+        [2.60, 2.45, 2.35, 2.55, 2.40, 1.70, 1.00],
+    ]
+    NODE_ACCESS_DELAY = {"rt_edge": -0.04, "low_power": -0.02, "normal_edge": 0.00, "efficient": 0.02,
+                         "batch_node": 0.03, "ai_accel": 0.08, "high_perf": 0.10, "backup_low": -0.01,
+                         "factory_cloud": 0.20, "regional_cloud": 0.35}
+    LINK_BW = 50.0  # 兼容旧逻辑的默认带宽；新模型实际使用 TRANS_BW_MATRIX
+    LOCAL_UPLOAD_DELAY = 0.20  # 本地接入固定附加时延
+    LOCAL_DOWNLOAD_DELAY = 0.05  # Result-return access delay after remote execution
+    # ===========================================================
+    # Trade-off 场景倍率：用于把“云不是永远最优”的冲突显式化。
+    # 1.0 表示保持原始设定；>1 表示上云传输更慢/更耗能；<1 表示云算力被削弱。
+    # 这些参数只作用于云目标节点，不改变边缘节点。
+    # ===========================================================
+    CLOUD_DELAY_MULT = 1.0
+    CLOUD_ENERGY_MULT = 1.0
+    CLOUD_SPEED_MULT = 1.0  # Compatibility alias for CLOUD_SERVICE_RATE_MULT.
+    CLOUD_SERVICE_RATE_MULT = 1.0
+    USE_LINK_QUEUE = False  # 第一版默认不做链路占用；如需链路串行排队，可改 True
+    TRANS_DELAY_MATRIX = []  # 节点对之间的基础拓扑时延矩阵，后面会自动生成
+    TRANS_BW_MATRIX = []  # 节点对之间的带宽矩阵，后面会自动生成
+
+    # 利用率功耗模型：P(u)=P_idle+(P_max-P_idle)*u^alpha。
+    # objective 默认采用 active_idle：节点有运行/排队任务才计 idle power，空闲时视为可睡眠。
+    # real_energy 额外记录所有节点常开时的真实背景能耗，便于论文解释，但默认不放入 cost。
+    USE_POWER_ENERGY_MODEL = True
+    UTIL_POWER_ALPHA = 1.0
+    OBJECTIVE_IDLE_MODE = "active_only"  # active_only / always_on / none
+    REAL_IDLE_MODE = "always_on"  # always_on / active_only / none
+    SLEEP_POWER_RATIO = 0.05
+
+    MAX_HISTORY = 120  # GP 训练时保留的额外历史上限
+    RECENT_HISTORY = 200  # 最近样本缓存长度
+    ARCHIVE_PER_STATE = 12  # 每个情景/状态下额外保留的历史代表样本数
+
+    ARRIVAL_THRESHOLDS = (1.25, 1.75)  # 到达率划分 LOW/MID/HIGH 的阈值；运行时会按 LAMBDA_SCHEDULE 自动重算
+    DELAY_THRESHOLDS = (6.0, 12.0)  # 平均时延划分 LOW/MID/HIGH 的阈值
+    UTIL_THRESHOLDS = (0.5, 0.85)  # 平均利用率划分 LOW/MID/HIGH 的阈值
+
+    # 7 维连续情景向量：既包含系统压力，也显式包含任务结构
+    # 说明：去掉了“平均时延”这一偏滞后的结果量，加入三类任务到达占比，
+    # 让情景表示更偏“原因 + 压力”，更适合做相似场景检索。
+    CONTEXT_FEATURE_NAMES = [
+        "arrival_rate",         # 总到达强度
+        "avg_util",             # 平均资源利用率
+        "backlog",              # 系统积压量
+        "vio_rate",             # 违约率
+        "rt_arrival_ratio",     # 最近窗口内 RT 到达占比
+        "batch_arrival_ratio",  # 最近窗口内 Batch 到达占比
+        "ai_arrival_ratio",     # 最近窗口内 AI 到达占比
+    ]
+    CONTEXT_BOUNDS = [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [5.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0],
+    ]  # 情景向量归一化边界
+    CONTEXT_KNN = 8  # 情景 BO 中找相似上下文历史样本时使用的近邻数
+    CONTEXT_SIMILARITY_MODE = "gaussian"  # 默认用高斯核；可切到 inverse_distance 做退化/轻量相似度
+    CONTEXT_KERNEL_LENGTHS = [0.28, 0.20, 0.25, 0.18, 0.16, 0.16, 0.16]  # 归一化空间中的核长度尺度
+    TRUST_RADIUS_INIT = 0.10  # Trust Region 初始半径（相对于归一化空间）
+    TRUST_RADIUS_MIN = 0.04  # Trust Region 最小半径
+    TRUST_RADIUS_MAX = 0.35  # Trust Region 最大半径
+    TRUST_RADIUS_GROWTH = 1.15  # 如果本轮更优，TR 半径扩大倍数
+    TRUST_RADIUS_SHRINK = 0.92  # 如果本轮没变好，TR 半径缩小倍数
+
+    DELAY_NORM = 10.0  # 节点评分时对时延的归一化尺度；车间/云拓扑下传输差异更明显
+    ENERGY_NORM = 4000.0  # 节点评分时对能耗的归一化尺度；功率×时间模型下能耗量级更大
+    DEADLINE_RISK_NORM = 10.0  # 节点评分时对违约风险的归一化尺度
+    ENERGY_WEIGHT = 1.0  # 预留参数；当前主要通过 theta 中后三维控制能耗权重
+    DEADLINE_WEIGHT = 2.0  # 默认违约风险权重（若任务类型未单独指定）
+    COMPLETE_PENALTY = 2.0  # 预留参数，当前主 cost 未直接使用
+    VIO_PENALTY = 3.0  # 预留参数，当前主 cost 未直接使用
+    SLA_PENALTY_WEIGHT = 1500.0  # Legacy/diagnostic SLA penalty; window cost now uses RT violation excess.
+    EARLY_BONUS_WEIGHT = 200.0  # 提前完成的奖励强度
+    USE_EARLY_BONUS = False  # 主实验先关闭提前奖励，避免长 deadline 任务主导 reward
+    EARLY_BONUS_CAP = 5.0  # 若开启提前奖励，只奖励有限提前量，避免 reward 被 slack 无限放大
+    LATE_PENALTY_WEIGHT = 300.0  # Legacy/diagnostic lateness penalty; not part of the main window cost.
+    BACKLOG_WEIGHT = 200.0  # Legacy raw backlog weight; main window cost uses backlog growth rate instead.
+    ZERO_COMPLETION_PENALTY = 5000.0  # Kept as diagnostic; unfinished rate now covers no-completion windows.
+    WINDOW_DELAY_WEIGHT = 1.0
+    WINDOW_ENERGY_WEIGHT = 1.0
+    WINDOW_RT_VIOLATION_WEIGHT = 4.0
+    WINDOW_UNFINISHED_WEIGHT = 6.0
+    WINDOW_BACKLOG_GROWTH_WEIGHT = 2.0
+    WINDOW_RT_VIOLATION_EPS = 0.02
+    WINDOW_ENERGY_SCALE = 1000.0
+
+    # ===========================================================
+    # BO 反馈模式
+    # ===========================================================
+    # window：旧版窗口级即时反馈，窗口结束后把该窗口 cost 直接 tell 给 BO。
+    # cohort_complete：任务批次级延迟反馈。每个 BO 窗口新到任务绑定当前 theta；
+    # 只有该批任务全部完成，或者实验结束强制结算时，才把 cohort_cost 反馈给 BO。
+    # 注意：即使使用 cohort_complete，窗口级指标仍然会保留用于画图和系统监控。
+    FEEDBACK_MODE = "window"
+    COHORT_UNFINISHED_PENALTY = 1000.0
+    COHORT_PENDING_AREA_WEIGHT = 5.0
+    COHORT_FORCE_FINALIZE_AT_RUN_END = True
+    CBO_REFERENCE_MODE = "calibrate"
+    CBO_REFERENCE_CALIBRATION_ROUNDS = 30
+    CBO_REFERENCE_MIN_ROUNDS = 5
+    CBO_REFERENCE_STAT = "median"
+    CBO_REFERENCE_TRIM_PCT = 0.1
+    CBO_REFERENCE_FREEZE_AFTER_CALIBRATION = True
+    CBO_REFERENCE_FILE = ""
+    CBO_REFERENCE_OUTPUT_FILE = ""
+    CBO_OBJECTIVE_MODE = "normalized_tradeoff"
+    SCENARIO_NORMALIZATION_REFERENCE = None
+    SCENARIO_NORMALIZATION_REFERENCE_CACHE = {}
+    PHASE_REFERENCE_SCOPE = "significant_external"
+    PHASE_REFERENCE_SWITCH_MODE = "dynamic_schedule"
+    PHASE_LAMBDA_REL_THRESHOLD = 0.30
+    PHASE_TASK_MIX_L1_THRESHOLD = 0.25
+    PHASE_DEADLINE_PRESSURE_REL_THRESHOLD = 0.20
+    PHASE_RESOURCE_PERTURBATION_ID = "normal"
+    PHASE_LINK_PROFILE_ID = "normal"
+    PHASE_CALIBRATION_WINDOW_LABEL = "warm_up"
+    PHASE_REFERENCE_WARMUP_ROUNDS = 5
+
+    HARD_DEADLINE = False  # 预留开关；当前不再默认硬筛选 RT 可行节点
+
+    REPEAT_RUNS = 1  # 整体实验重复次数
+    BASE_SEED = 42  # 默认实验主种子
+    # 服务器当前 no-RoundRobin runner 默认值，写入脚本方便备份和复现实验。
+    DEFAULT_NO_RR_OUTPUT_FAMILY = "v6_500_bestcbo_direct36_norr"
+    DEFAULT_SCENARIO_FEEDBACK_SCORE = "task_effective_backlog_violation"
+    DEFAULT_BO_HISTORY_MODE = "recent"
+    DEFAULT_BO_RECENT_WINDOW = 80
+    # CBO stability extensions. Defaults intentionally preserve existing behavior.
+    DEFAULT_CBO_HISTORY_SELECT_MODE = "recent"
+    DEFAULT_CBO_CONTEXT_K = 50
+    DEFAULT_CBO_ELITE_K = 20
+    DEFAULT_CBO_DIVERSE_K = 20
+    DEFAULT_CBO_ROBUST_SCORE_MODE = "none"
+    DEFAULT_CBO_ROBUST_STD_WEIGHT = 0.5
+    DEFAULT_CBO_THETA_MERGE_EPS = 0.05
+    DEFAULT_CBO_CONTEXT_SIM_THRESHOLD = 0.0
+    # State-gated kernel history selection. Defaults are inert unless
+    # --cbo-history-select-mode state_gated_kernel or
+    # --dynamic-history-mode state_gated_kernel is explicitly used.
+    DEFAULT_CBO_STATE_KERNEL_TOPK = 100
+    DEFAULT_CBO_STATE_KERNEL_MIN_ROWS = 20
+    DEFAULT_CBO_STATE_KERNEL_RECENT_KEEP = 20
+    DEFAULT_CBO_STATE_KERNEL_THRESHOLD = 0.05
+    DEFAULT_CBO_STATE_KERNEL_FALLBACK = "recent_context"  # recent / recent_context / all
+    DEFAULT_CBO_STATE_KERNEL_MAX_WORKLOAD_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_STATE_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_TREND_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_UNFINISHED_DIFF = 0.30
+    DEFAULT_CBO_STATE_KERNEL_MAX_BACKLOG_DIFF = 0.50
+    DEFAULT_CBO_STATE_KERNEL_TREND_SIGN_VETO = True
+    DEFAULT_CBO_STATE_KERNEL_TREND_SIGN_MIN = 0.02
+    DEFAULT_CBO_STATE_KERNEL_BACKLOG_REF = 500.0
+    DEFAULT_CBO_STATE_KERNEL_COST_REF = 20000.0
+    DEFAULT_CBO_STATE_KERNEL_DELAY_REF = 30.0
+    DEFAULT_CBO_STATE_KERNEL_LS_WORKLOAD_TOTAL = 0.35
+    DEFAULT_CBO_STATE_KERNEL_LS_WORKLOAD_RT = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_WORKLOAD_BATCH = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_BACKLOG = 0.25
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_UNFINISHED = 0.15
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_AVG_UTIL = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_STATE_MAX_UTIL = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_BACKLOG = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_UNFINISHED = 0.10
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_COST = 0.20
+    DEFAULT_CBO_STATE_KERNEL_LS_TREND_DELAY = 0.20
+    # Rate-aware state kernel.  Defaults preserve the original distance
+    # shape (gain=1, power=1).  Increase gain/power from CLI to enlarge
+    # internal trend/rate differences without changing workload matching.
+    DEFAULT_CBO_STATE_KERNEL_RATE_GAIN = 1.0
+    DEFAULT_CBO_STATE_KERNEL_RATE_POWER = 1.0
+    DEFAULT_CBO_STATE_KERNEL_MAX_RATE_DIST = 3.0
+    DEFAULT_CBO_STATE_KERNEL_RATE_SIGN_VETO = True
+    DEFAULT_CBO_TR_MODE = "off"
+    DEFAULT_CBO_TR_ANCHOR_MODE = "posterior_mean"
+    DEFAULT_CBO_ROBUST_INCUMBENT_MODE = "off"
+    DEFAULT_CBO_MACRO_GATE_MODE = "off"
+    DEFAULT_CBO_MACRO_K = 100
+    DEFAULT_CBO_MACRO_TOTAL_SCALE = "auto"
+    DEFAULT_CBO_MACRO_LENGTHSCALE_TOTAL = 1.0
+    DEFAULT_CBO_MACRO_LENGTHSCALE_RT = 0.15
+    DEFAULT_CBO_MACRO_LENGTHSCALE_BATCH = 0.15
+    DEFAULT_CBO_MACRO_ALPHA = 1.0
+    DEFAULT_CBO_DUMP_CANDIDATES = False
+    DEFAULT_CBO_DUMP_CANDIDATES_EVERY = 20
+    DEFAULT_CBO_DUMP_CANDIDATES_TOPN = 30
+    # CBO TR / selection experimental extensions. Defaults preserve old behavior.
+    DEFAULT_CBO_SELECT_MODE = "greedy"  # greedy / topk_stochastic / epsilon_greedy / randomized_ucb
+    DEFAULT_CBO_TOPK = 5
+    DEFAULT_CBO_SELECT_TEMPERATURE = 0.20
+    DEFAULT_CBO_EPSILON = 0.10
+    DEFAULT_CBO_ACQ_BETA = 3.0
+    DEFAULT_CBO_GOOD_REGION_GUARD = "off"
+    DEFAULT_CBO_GOOD_REGION_WINDOW = 50
+    DEFAULT_CBO_GOOD_REGION_WORSE_PCT = 0.03
+    DEFAULT_CBO_GOOD_REGION_DISTANCE_THRESHOLD = 0.35
+    DEFAULT_CBO_GOOD_REGION_TR_RADIUS_THRESHOLD = 0.15
+    DEFAULT_CBO_GOOD_REGION_BETA_THRESHOLD = 0.5
+    DEFAULT_CBO_GOOD_REGION_GUARD_MODE = "conservative"
+    DEFAULT_CBO_SURPRISE_WINDOW = 10
+    DEFAULT_CBO_SURPRISE_Z_THRESHOLD = 2.0
+    DEFAULT_CBO_SURPRISE_COST_GAP_PCT = 0.03
+    # Prediction-error-aware guard diagnostics. Defaults preserve old behavior.
+    # off: disabled; diagnostic: only log whether guard would trigger, without changing deployment.
+    DEFAULT_CBO_PREDICTION_GUARD = "off"
+    DEFAULT_CBO_PREDICTION_GUARD_WINDOW = 50
+    DEFAULT_CBO_PREDICTION_GUARD_MIN_HISTORY = 20
+    DEFAULT_CBO_PREDICTION_GUARD_BIAS_THRESHOLD = 300.0
+    DEFAULT_CBO_PREDICTION_GUARD_UNDERESTIMATE_RATE = 0.65
+    DEFAULT_CBO_PREDICTION_GUARD_START_ITER = 200
+    DEFAULT_CBO_PREDICTION_GUARD_BIAS_WEIGHT = 1.0
+    DEFAULT_CBO_PREDICTION_GUARD_MAE_WEIGHT = 0.5
+    DEFAULT_CBO_SIGMA_FLOOR = 1e-6
+    DEFAULT_CBO_RADIUS_RESET = 0.12
+    DEFAULT_CBO_RADIUS_MIN_STUCK_ROUNDS = 10
+    DEFAULT_CBO_REBOUND_WINDOW = 20
+    DEFAULT_CBO_REBOUND_THRESHOLD_PCT = 0.03
+    DEFAULT_CBO_SELECTION_COOLDOWN = 5
+    DEFAULT_CBO_CONDITION_ANCHOR_SWITCH = "context_best"  # off / recent_best / context_best / robust_elite
+    DEFAULT_CBO_WARM_START_HISTORY = ""
+    DEFAULT_CBO_WARM_START_MODE = "none"
+    DEFAULT_CBO_WARM_START_TOPK = 100
+    DEFAULT_CBO_WARM_START_MAX_ROWS = 300
+    DEFAULT_CBO_WARM_START_LABEL = ""
+    DEFAULT_CBO_HISTORY_DENOISE_MODE = "off"
+    DEFAULT_CBO_HISTORY_DENOISE_K = 7
+    DEFAULT_CBO_HISTORY_DENOISE_RADIUS = 0.12
+    DEFAULT_CBO_HISTORY_DENOISE_MIN_NEIGHBORS = 3
+    DEFAULT_CBO_HISTORY_DENOISE_CONTEXT_WEIGHT = 1.0
+    DEFAULT_CBO_HISTORY_DENOISE_THETA_WEIGHT = 1.0
+    DEFAULT_CBO_HISTORY_DENOISE_STAT = "median"
+    DEFAULT_CBO_HISTORY_DENOISE_TRIM_PCT = 0.1
+    DEFAULT_CBO_HISTORY_DENOISE_APPLY_TO = "all"
+    DEFAULT_CBO_HISTORY_OUTLIER_THRESHOLD = 3.0
+    DEFAULT_CBO_HISTORY_OUTLIER_ABS_THRESHOLD = 500.0
+    DEFAULT_CBO_HISTORY_OUTLIER_MAX_FILTER_RATIO = 0.2
+    DEFAULT_CBO_HISTORY_OUTLIER_SCALE = "mad"
+    DEFAULT_CBO_HISTORY_OUTLIER_THETA_RADIUS = 0.12
+    DEFAULT_CBO_HISTORY_OUTLIER_CONTEXT_RADIUS = 0.50
+    DEFAULT_CBO_HISTORY_OUTLIER_MIN_PEERS = 3
+    DEFAULT_CBO_HISTORY_OUTLIER_USE_LEAVE_ONE_OUT = True
+    DEFAULT_CBO_HISTORY_OUTLIER_EXPORT_FILTERED = True
+    DEFAULT_CBO_HISTORY_OUTLIER_PROTECT_PRESSURE = False
+    DEFAULT_CBO_HISTORY_OUTLIER_PRESSURE_QUANTILE = 0.75
+    DEFAULT_CBO_HISTORY_OUTLIER_PROTECT_HIGH_COST_ONLY = True
+    DEFAULT_CBO_HISTORY_OUTLIER_PRESSURE_FIELDS = "Avg_Delay,Backlog,unfinished_end,Violation"
+
+    # ===========================================================
+    # Dynamic multi-phase scenario experiment defaults
+    # -----------------------------------------------------------
+    # These defaults are inert unless --mode dynamic_scenario is used.
+    # A dynamic schedule is a single-factory sequence of workload phases.
+    # BO/CBO agents keep their local history across phase switches.
+    # ===========================================================
+    DEFAULT_DYNAMIC_SCHEDULE = ""
+    DEFAULT_DYNAMIC_HISTORY_MODE = "all_history"  # all_history / recent_window / context_topk / state_gated_kernel
+    DEFAULT_DYNAMIC_HISTORY_WINDOW = 200
+    DEFAULT_DYNAMIC_CONTEXT_TOPK = 100
+    DYNAMIC_SCENARIO_ACTIVE = False
+    DYNAMIC_PHASE_PLAN = []
+    DYNAMIC_HISTORY_MODE = DEFAULT_DYNAMIC_HISTORY_MODE
+    DYNAMIC_HISTORY_WINDOW = DEFAULT_DYNAMIC_HISTORY_WINDOW
+    DYNAMIC_CONTEXT_TOPK = DEFAULT_DYNAMIC_CONTEXT_TOPK
+
+    DEFAULT_SELECTED_KEYS_NO_RR = [
+        "reduced6_fixed_mid",
+        "reduced6_fixed_tuned",
+        "reduced6_bo_greedy",
+        "reduced6_cbo_lite_pressure_taskmix_counts",
+        "direct_greedy_cost",
+        "direct_least_load",
+        "direct_queue_aware_greedy",
+    ]
+
+    REWARD_TARGET = -0.5  # 若训练 beta，可把它视为目标 reward/cost 参考值
+    USE_FIXED_RNG = True  # 是否固定随机数，便于复现实验
+    FIXED_RNG_SEED = 42  # 固定随机种子值
+    CONTROL_WEIGHT_BOUNDS = (0.1, 5.0)
+    CONTROL_QUEUE_BOUNDS = (0.0, 5.0)
+    CONTROL_RISK_SCALE_BOUNDS = (0.0, 5.0)
+    CONTROL_BETA_BOUNDS = (0.5, 8.0)
+    CONTROL_OPPORTUNITY_RHO_BOUNDS = (0.0, 3.0)
+    CONTROL_CLOUD_GATE_BOUNDS = (0.05, 0.95)
+
+CFG = ExperimentConfig()
+CFG.ARRIVAL_THRESHOLDS = infer_arrival_thresholds(CFG.LAMBDA_SCHEDULE)
+CFG.TRANS_DELAY_MATRIX = build_topology_matrix(len(CFG.NODES_CFG))
+CFG.TRANS_BW_MATRIX = build_bandwidth_matrix(len(CFG.NODES_CFG))
+
+if not getattr(CFG, "USE_EXTENDED_BO_CONTROL", True):
+    CFG.FEATURE_NAMES = list(CFG.BASE_FEATURE_NAMES)
+    CFG.DIM_THETA = len(CFG.FEATURE_NAMES)
+
+
+def get_control_bounds(dim=None):
+    """返回当前 BO 控制变量的逐维搜索边界。"""
+    dim = int(CFG.DIM_THETA if dim is None else dim)
+    lows, highs = [], []
+    for name in list(CFG.FEATURE_NAMES)[:dim]:
+        if name == "W_Queue":
+            lo, hi = CFG.CONTROL_QUEUE_BOUNDS
+        elif name == "W_Risk_Scale":
+            lo, hi = CFG.CONTROL_RISK_SCALE_BOUNDS
+        elif name == "Beta_Control":
+            lo, hi = CFG.CONTROL_BETA_BOUNDS
+        elif name == "Opportunity_Rho":
+            lo, hi = CFG.CONTROL_OPPORTUNITY_RHO_BOUNDS
+        elif name == "Cloud_Gate":
+            lo, hi = CFG.CONTROL_CLOUD_GATE_BOUNDS
+        else:
+            lo, hi = CFG.CONTROL_WEIGHT_BOUNDS
+        lows.append(float(lo))
+        highs.append(float(hi))
+    return [lows, highs]
+
+
+def get_theta_value(theta_full, name, default):
+    try:
+        names = list(CFG.FEATURE_NAMES)
+        if name not in names:
+            return float(default)
+        idx = names.index(name)
+        theta = normalize_theta_vector(theta_full, dim=CFG.DIM_THETA, fill=default)
+        if idx >= len(theta):
+            return float(default)
+        val = float(theta[idx])
+        if not np.isfinite(val):
+            return float(default)
+        return val
+    except Exception:
+        return float(default)
+
+
+def extract_scheduler_controls(theta_full):
+    """从 BO 输出 theta 中解析调度器使用的扩展控制量。"""
+    beta = get_theta_value(theta_full, "Beta_Control", getattr(CFG, "BETA_DEFAULT", CFG.BETA_INITIAL))
+    beta = float(np.clip(beta, *CFG.CONTROL_BETA_BOUNDS))
+    rho = get_theta_value(theta_full, "Opportunity_Rho", getattr(CFG, "OPPORTUNITY_RHO_DEFAULT", 1.0))
+    rho = float(np.clip(rho, *CFG.CONTROL_OPPORTUNITY_RHO_BOUNDS))
+    cloud_gate = get_theta_value(theta_full, "Cloud_Gate", getattr(CFG, "CLOUD_GATE_DEFAULT", 0.50))
+    cloud_gate = float(np.clip(cloud_gate, *CFG.CONTROL_CLOUD_GATE_BOUNDS))
+    queue_w = get_theta_value(theta_full, "W_Queue", getattr(CFG, "QUEUE_WEIGHT_DEFAULT", 1.0))
+    queue_w = float(np.clip(queue_w, *CFG.CONTROL_QUEUE_BOUNDS))
+    risk_scale = get_theta_value(theta_full, "W_Risk_Scale", getattr(CFG, "RISK_SCALE_DEFAULT", 1.0))
+    risk_scale = float(np.clip(risk_scale, *CFG.CONTROL_RISK_SCALE_BOUNDS))
+    return {
+        "beta": beta if getattr(CFG, "USE_BO_BETA_CONTROL", True) else float(getattr(CFG, "BETA_INITIAL", 3.0)),
+        "rho": rho if getattr(CFG, "USE_BO_OPPORTUNITY_RHO", True) else float(getattr(CFG, "OPPORTUNITY_RHO_DEFAULT", 1.0)),
+        "cloud_gate": cloud_gate if getattr(CFG, "USE_BO_CLOUD_GATE", True) else float(getattr(CFG, "CLOUD_GATE_DEFAULT", 0.50)),
+        "queue_w": queue_w if getattr(CFG, "USE_BO_QUEUE_WEIGHT", True) else float(getattr(CFG, "QUEUE_WEIGHT_DEFAULT", 1.0)),
+        "risk_scale": risk_scale if getattr(CFG, "USE_BO_RISK_SCALE", True) else float(getattr(CFG, "RISK_SCALE_DEFAULT", 1.0)),
+        "safety_margin_scale": float(getattr(CFG, "SAFETY_MARGIN_SCALE_DEFAULT", 1.0)),
+    }
+
+SAVE_DIR = os.path.abspath("pic_core_v2")
+if not os.path.exists(SAVE_DIR): os.makedirs(SAVE_DIR)
+SCENARIO_SAVE_DIR = os.path.abspath("pic_scenario_trust_region")
+if not os.path.exists(SCENARIO_SAVE_DIR): os.makedirs(SCENARIO_SAVE_DIR)
+
+# 字体设置
+plt.rcParams['axes.unicode_minus'] = False
+for font in ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'sans-serif']:
+    try:
+        matplotlib.font_manager.fontManager.findfont(font, fallback_to_default=False)
+        plt.rcParams['font.sans-serif'] = [font]
+        break
+    except:
+        continue
+
+# ==========================================
+# 2. 仿真核心 (Simulation)
+# ==========================================
