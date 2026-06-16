@@ -893,7 +893,7 @@ class ExperimentConfig:
     WINDOW_ENERGY_WEIGHT = 1.0
     WINDOW_RT_VIOLATION_WEIGHT = 4.0
     WINDOW_UNFINISHED_WEIGHT = 6.0
-    WINDOW_BACKLOG_GROWTH_WEIGHT = 0.0
+    WINDOW_BACKLOG_GROWTH_WEIGHT = 2.0
     WINDOW_RT_VIOLATION_EPS = 0.02
     WINDOW_ENERGY_SCALE = 1000.0
 
@@ -911,15 +911,6 @@ class ExperimentConfig:
     CBO_REFERENCE_MODE = "calibrate"
     CBO_REFERENCE_CALIBRATION_ROUNDS = 30
     CBO_REFERENCE_MIN_ROUNDS = 5
-    # Shared normalization reference policy.
-    # cbo_first: the selected CBO method runs within the normal BO budget,
-    # uses the first few windows to build the reference, then BO/other methods
-    # reuse that CBO-derived reference scale.
-    # fixed_probe: legacy neutral fixed-policy probe before method runs.
-    CBO_SHARED_REFERENCE_POLICY = "cbo_first"
-    CBO_SHARED_REFERENCE_WARMUP_ROUNDS = 5
-    CBO_REFERENCE_SOURCE_METHOD_KEY = "reduced7_cbo_lite_pressure_taskmix_counts"
-    CBO_SHARED_REFERENCE_ACTIVE_SOURCE_KEY = ""
     CBO_REFERENCE_STAT = "median"
     CBO_REFERENCE_TRIM_PCT = 0.1
     CBO_REFERENCE_FREEZE_AFTER_CALIBRATION = True
@@ -1191,4 +1182,3 @@ for font in ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'sans-serif']:
 # ==========================================
 # 2. 仿真核心 (Simulation)
 # ==========================================
-

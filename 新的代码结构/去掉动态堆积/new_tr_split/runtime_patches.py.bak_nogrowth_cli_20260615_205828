@@ -1902,56 +1902,6 @@ def _cbo_metric_reference_from_cache(factory):
     return None, phase, signature, "phase_reference_missing"
 
 
-def _cbo_first_reference_policy_active():
-    policy = str(getattr(CFG, "CBO_SHARED_REFERENCE_POLICY", "") or "").strip().lower()
-    mode = str(getattr(CFG, "CBO_REFERENCE_MODE", "off") or "off").strip().lower()
-    return policy in {"cbo_first", "cbo-derived", "cbo_derived"} and mode in {"calibrate", "auto_macro"}
-
-
-def _cbo_first_source_reference_enabled(factory):
-    if not _cbo_first_reference_policy_active() or factory is None:
-        return False
-    return bool(getattr(factory, "_cbo_shared_reference_source", False))
-
-
-def _cbo_publish_source_reference(ref, signature, phase, source_key):
-    if not isinstance(ref, dict) or not str(signature or "").strip():
-        return
-    signature = str(signature)
-    cache = getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE_CACHE", None)
-    if not isinstance(cache, dict):
-        cache = {}
-    out = dict(ref)
-    out.setdefault("reference_name", "scenario_normalization_reference_scale")
-    out["reference_id"] = str(out.get("reference_id") or (phase or {}).get("active_reference_id") or ("ref_" + signature))
-    out["phase_signature"] = signature
-    out["source_policy_key"] = str(source_key or "")
-    out["source"] = "cbo_first_online_warmup"
-    out["reference_source"] = "cbo_derived_shared_reference"
-    out["shared_by_methods"] = True
-    out["phase_reference_mode"] = "cbo_first_within_budget"
-    out["phase_reference_warmup_rounds"] = int(getattr(CFG, "CBO_SHARED_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5)))
-    out["phase_reference_freeze_policy"] = "freeze_after_cbo_warmup"
-    if isinstance(phase, dict):
-        out.setdefault("phase_id", phase.get("phase_id"))
-        out.setdefault("phase_name", phase.get("phase_name", ""))
-        out.setdefault("phase_signature_basis", phase.get("phase_signature_basis", {}))
-        out.setdefault("phase_signature_reason", phase.get("phase_signature_reason", ""))
-    cache[signature] = out
-    macro = str(out.get("macro_context_key", ""))
-    if macro:
-        cache.setdefault(macro, out)
-    CFG.SCENARIO_NORMALIZATION_REFERENCE_CACHE = cache
-    CFG.SCENARIO_NORMALIZATION_REFERENCE = out
-    write_bank = globals().get("_write_reference_bank")
-    if callable(write_bank):
-        try:
-            write_bank(cache, output_dir=globals().get("SCENARIO_SAVE_DIR", None))
-        except Exception:
-            pass
-    print(f"[ScenarioReference] CBO-first cached reference signature={signature} source={source_key}", flush=True)
-
-
 def _cbo_metric_reference_patch(factory, metrics):
     # Compute extra metric diagnostics and optional normalized tradeoff objective.
     # Mutates and returns metrics. Falls back to Eval_Cost if reference unavailable.
@@ -2019,9 +1969,6 @@ def _cbo_metric_reference_patch(factory, metrics):
     })
 
     active_phase = _cbo_metric_active_phase(factory)
-    if not isinstance(active_phase, dict):
-        phase_fn = globals().get("_current_static_reference_phase")
-        active_phase = phase_fn() if callable(phase_fn) else None
     active_phase_signature = str(active_phase.get("phase_signature", active_phase.get("signature", ""))) if isinstance(active_phase, dict) else ""
     active_reference_id = str(active_phase.get("active_reference_id", "")) if isinstance(active_phase, dict) else ""
     active_phase_iter = None
@@ -2066,21 +2013,6 @@ def _cbo_metric_reference_patch(factory, metrics):
         ref_frozen = False
         ref = None
         ref_status = "no_factory"
-    elif _cbo_first_source_reference_enabled(factory):
-        if not hasattr(factory, "_cbo_reference_records_by_signature"):
-            factory._cbo_reference_records_by_signature = {}
-            factory._cbo_reference_by_signature = {}
-            factory._cbo_reference_frozen_by_signature = {}
-            factory._cbo_reference_status_by_signature = {}
-        sig_key = str(active_phase_signature or cached_signature or metrics.get("macro_context_key") or "single_reference")
-        records_by_sig = factory._cbo_reference_records_by_signature
-        refs_by_sig = factory._cbo_reference_by_signature
-        frozen_by_sig = factory._cbo_reference_frozen_by_signature
-        status_by_sig = factory._cbo_reference_status_by_signature
-        ref_records = records_by_sig.setdefault(sig_key, [])
-        ref = refs_by_sig.get(sig_key)
-        ref_frozen = bool(frozen_by_sig.get(sig_key, False))
-        ref_status = str(status_by_sig.get(sig_key, "new"))
     else:
         if not hasattr(factory, "_cbo_reference_records"):
             factory._cbo_reference_records = []
@@ -2105,47 +2037,26 @@ def _cbo_metric_reference_patch(factory, metrics):
         if not ref_frozen and factory is not None:
             ref_records.append(dict(metrics))
             n_rec = len(ref_records)
-            if _cbo_first_source_reference_enabled(factory):
-                warmup_rounds = max(1, int(getattr(CFG, "CBO_SHARED_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))))
-                min_rounds = warmup_rounds
-                calib_rounds = warmup_rounds
-            else:
-                min_rounds = int(getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))
-                calib_rounds = int(getattr(CFG, "CBO_REFERENCE_CALIBRATION_ROUNDS", 30))
+            min_rounds = int(getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))
+            calib_rounds = int(getattr(CFG, "CBO_REFERENCE_CALIBRATION_ROUNDS", 30))
             if n_rec < min_rounds:
                 ref_status = "calibrating_min_rounds"
             elif n_rec < calib_rounds:
                 ref_status = "calibrating"
                 ref = _cbo_build_reference(ref_records)
-                if _cbo_first_source_reference_enabled(factory):
-                    factory._cbo_reference_by_signature[str(active_phase_signature or cached_signature or "single_reference")] = ref
-                    factory._cbo_reference_status_by_signature[str(active_phase_signature or cached_signature or "single_reference")] = ref_status
-                else:
-                    factory._cbo_reference = ref
+                factory._cbo_reference = ref
             else:
                 ref = _cbo_build_reference(ref_records[-calib_rounds:])
-                if _cbo_first_source_reference_enabled(factory):
-                    sig_key = str(active_phase_signature or cached_signature or "single_reference")
-                    factory._cbo_reference_by_signature[sig_key] = ref
-                    factory._cbo_reference_frozen_by_signature[sig_key] = bool(getattr(CFG, "CBO_REFERENCE_FREEZE_AFTER_CALIBRATION", True))
-                    ref_frozen = bool(factory._cbo_reference_frozen_by_signature[sig_key])
-                else:
-                    factory._cbo_reference = ref
-                    factory._cbo_reference_frozen = bool(getattr(CFG, "CBO_REFERENCE_FREEZE_AFTER_CALIBRATION", True))
-                    ref_frozen = bool(factory._cbo_reference_frozen)
+                factory._cbo_reference = ref
+                factory._cbo_reference_frozen = bool(getattr(CFG, "CBO_REFERENCE_FREEZE_AFTER_CALIBRATION", True))
+                ref_frozen = bool(factory._cbo_reference_frozen)
                 ref_status = "frozen" if ref_frozen else "calibrated_unfrozen"
-                if _cbo_first_source_reference_enabled(factory):
-                    sig_key = str(active_phase_signature or cached_signature or "single_reference")
-                    factory._cbo_reference_status_by_signature[sig_key] = ref_status
-                    if ref_frozen:
-                        _cbo_publish_source_reference(ref, sig_key, active_phase, getattr(factory, "_cbo_shared_reference_source_key", ""))
                 _cbo_write_reference_if_needed(ref)
         else:
             ref_status = ref_status if ref_status in {"shared_frozen", "cache_frozen"} else ("frozen" if ref_frozen else ref_status)
     else:
         ref_status = f"unknown_reference_mode:{ref_mode}"
 
-    ref_available = isinstance(ref, dict)
     reference_source = "none"
     if isinstance(cached_ref, dict):
         reference_source = str(cached_ref.get("reference_source", "phase_triggered_shared_reference_bank"))
@@ -2153,17 +2064,11 @@ def _cbo_metric_reference_patch(factory, metrics):
         reference_source = "shared_precomputed_reference"
     elif str(ref_status).startswith("calibrating"):
         reference_source = "online_warm_up"
-    cbo_first_source_warmup_window = (
-        _cbo_first_source_reference_enabled(factory)
-        and len(ref_records) > 0
-        and len(ref_records) <= max(1, int(getattr(CFG, "CBO_SHARED_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))))
-    )
-    if _cbo_first_source_reference_enabled(factory) and ref_available:
-        reference_source = "cbo_first_online_warmup" if cbo_first_source_warmup_window else "cbo_first_source_reference"
-    is_calibration_window = bool(str(ref_status).startswith("calibrating") or phase_reference_warmup_window or cbo_first_source_warmup_window)
+    is_calibration_window = bool(str(ref_status).startswith("calibrating") or phase_reference_warmup_window)
     if phase_reference_warmup_window and isinstance(cached_ref, dict):
         ref_status = "cache_frozen_phase_warmup"
 
+    ref_available = isinstance(ref, dict)
     if reference_source == "none" and ref_available:
         reference_source = "online_or_loaded_reference"
     delay_ref = _cbo_metric_float(ref.get("delay_ref") if ref_available else np.nan)
@@ -6281,13 +6186,6 @@ def run_scenario_group(seed, group_key, group_cfg):
     fac = ConnectedFactory(fid=0, name=group_cfg["label"], seed=seed, node_config=CFG.NODES_CFG, scheduler_type=group_cfg.get("scheduler_type", "Boltzmann"), norm_mode=group_cfg.get("norm_mode", "rolling"))
     fac.reset(use_batch=False)
     fac.agent = create_scenario_agent(group_cfg, seed)
-    fac._cbo_shared_reference_source_key = str(getattr(CFG, "CBO_SHARED_REFERENCE_ACTIVE_SOURCE_KEY", "") or "")
-    fac._cbo_shared_reference_source = bool(
-        _cbo_first_reference_policy_active()
-        and fac._cbo_shared_reference_source_key
-        and str(group_key) == str(fac._cbo_shared_reference_source_key)
-        and _is_cbo_method_key(group_key, group_cfg)
-    )
     configure_refactor_agent(fac.agent, group_cfg)
     fac.perf_log["group_key"] = group_key
     fac.perf_log["group_label"] = group_cfg["label"]
@@ -6330,15 +6228,6 @@ def run_scenario_group(seed, group_key, group_cfg):
         f"history_mode={group_cfg.get('history_mode', _cfg_history_mode())} "
         f"recent_window={group_cfg.get('recent_window', _cfg_recent_window())} "
         f"source={group_cfg.get('history_override_source', 'method_default')}",
-        flush=True,
-    )
-    print(
-        f"[SCENARIO-REF] method={group_key} "
-        f"policy={getattr(CFG, 'CBO_SHARED_REFERENCE_POLICY', 'fixed_probe')} "
-        f"source_method={fac._cbo_shared_reference_source_key} "
-        f"is_source={int(bool(fac._cbo_shared_reference_source))} "
-        f"warmup_rounds={getattr(CFG, 'CBO_SHARED_REFERENCE_WARMUP_ROUNDS', getattr(CFG, 'CBO_REFERENCE_MIN_ROUNDS', 5))} "
-        f"cache_entries={len(getattr(CFG, 'SCENARIO_NORMALIZATION_REFERENCE_CACHE', {}) or {})}",
         flush=True,
     )
     print(

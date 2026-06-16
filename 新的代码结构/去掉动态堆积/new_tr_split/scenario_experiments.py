@@ -1153,6 +1153,143 @@ def _choose_reference_probe_group(groups):
     return None, None
 
 
+def _shared_reference_policy():
+    return str(getattr(CFG, "CBO_SHARED_REFERENCE_POLICY", "fixed_probe") or "fixed_probe").strip().lower()
+
+
+def _is_cbo_group_for_reference(group_key, group_cfg):
+    fn = globals().get("_is_cbo_method_key")
+    if callable(fn):
+        try:
+            return bool(fn(group_key, group_cfg))
+        except Exception:
+            pass
+    text = " ".join([
+        str(group_key or ""),
+        str((group_cfg or {}).get("label", "")),
+        str((group_cfg or {}).get("method_family", "")),
+    ]).lower()
+    return "cbo" in text
+
+
+def _choose_cbo_reference_source_group(groups):
+    preferred = []
+    configured = str(getattr(CFG, "CBO_REFERENCE_SOURCE_METHOD_KEY", "") or "").strip()
+    if configured:
+        preferred.append(configured)
+    preferred.extend([
+        "reduced7_cbo_lite_pressure_taskmix_counts",
+        "reduced7_cbo",
+        "cbo7",
+        "reduced6_cbo_lite_pressure_taskmix_counts",
+    ])
+    seen = set()
+    for key in preferred:
+        if key in seen:
+            continue
+        seen.add(key)
+        if key in groups and _is_cbo_group_for_reference(key, groups[key]):
+            return key, groups[key]
+    for key, cfg in groups.items():
+        if _is_cbo_group_for_reference(key, cfg):
+            return key, cfg
+    return None, None
+
+
+def _cbo_first_reference_enabled(groups):
+    if _shared_reference_policy() not in {"cbo_first", "cbo-derived", "cbo_derived"}:
+        return False
+    if str(getattr(CFG, "CBO_REFERENCE_MODE", "off")).lower() not in {"calibrate", "auto_macro"}:
+        return False
+    key, _ = _choose_cbo_reference_source_group(groups)
+    return bool(key)
+
+
+def _prepare_cbo_first_reference_plan(output_dir=None):
+    active_plan = list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or [])
+    if active_plan:
+        CFG.DYNAMIC_PHASE_PLAN = assign_phase_reference_signatures(active_plan)
+    CFG.SCENARIO_NORMALIZATION_REFERENCE = None
+    CFG.SCENARIO_NORMALIZATION_REFERENCE_CACHE = {}
+    if output_dir:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            pass
+
+
+def _reference_from_log_at(log, idx, source_key):
+    keys = [
+        "delay_ref", "energy_per_arrival_ref", "energy_norm_ref", "unfinished_rate_ref",
+        "backlog_ref", "backlog_growth_ref", "backlog_growth_rate_ref",
+        "rt_violation_rate_ref", "success_rate_ref", "eval_cost_ref",
+    ]
+    ref = {}
+    for key in keys:
+        vals = log.get(key, []) if isinstance(log, dict) else []
+        ref[key] = vals[idx] if idx < len(vals) else np.nan
+    sig_vals = log.get("phase_signature", []) if isinstance(log, dict) else []
+    id_vals = log.get("active_reference_id", []) if isinstance(log, dict) else []
+    macro_vals = log.get("macro_context_key", []) if isinstance(log, dict) else []
+    sig = str(sig_vals[idx]) if idx < len(sig_vals) and sig_vals[idx] not in (None, "") else ""
+    macro = str(macro_vals[idx]) if idx < len(macro_vals) and macro_vals[idx] not in (None, "") else ""
+    if not sig:
+        phase = _current_static_reference_phase()
+        sig = str(phase.get("phase_signature", phase.get("signature", "")))
+    ref.update({
+        "reference_name": "scenario_normalization_reference_scale",
+        "reference_id": str(id_vals[idx]) if idx < len(id_vals) and id_vals[idx] not in (None, "") else "ref_" + _phase_safe_token(sig or macro),
+        "phase_signature": sig,
+        "macro_context_key": macro,
+        "source_policy_key": str(source_key),
+        "source": "cbo_first_online_warmup",
+        "reference_source": "cbo_derived_shared_reference",
+        "shared_by_methods": True,
+        "phase_reference_mode": "cbo_first_within_budget",
+        "phase_reference_warmup_rounds": int(getattr(CFG, "CBO_SHARED_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))),
+        "phase_reference_freeze_policy": "freeze_after_cbo_warmup",
+    })
+    return sig or macro or "single_reference", ref
+
+
+def _publish_cbo_references_from_log(log, source_key, output_dir=None):
+    if not isinstance(log, dict):
+        return {}
+    available = list(log.get("cbo_reference_available", []) or [])
+    frozen = list(log.get("cbo_reference_frozen", []) or [])
+    cache = {}
+    for idx, ok in enumerate(available):
+        try:
+            is_ok = bool(ok)
+        except Exception:
+            is_ok = False
+        try:
+            is_frozen = bool(frozen[idx]) if idx < len(frozen) else is_ok
+        except Exception:
+            is_frozen = is_ok
+        if not (is_ok and is_frozen):
+            continue
+        sig, ref = _reference_from_log_at(log, idx, source_key)
+        cache[str(sig)] = ref
+    if not cache:
+        return {}
+    CFG.SCENARIO_NORMALIZATION_REFERENCE_CACHE = dict(cache)
+    CFG.SCENARIO_NORMALIZATION_REFERENCE = next(iter(cache.values()))
+    _write_reference_bank(cache, output_dir=output_dir)
+    if output_dir:
+        try:
+            with open(os.path.join(output_dir, "scenario_normalization_reference.json"), "w", encoding="utf-8") as f:
+                json.dump(CFG.SCENARIO_NORMALIZATION_REFERENCE, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARN] failed to write CBO-first scenario reference json: {e}")
+    print(
+        f"[ScenarioReference] CBO-first published {len(cache)} shared reference(s) "
+        f"from source={source_key}, signatures={list(cache.keys())}",
+        flush=True,
+    )
+    return cache
+
+
 def _phase_safe_float(value, default=0.0):
     try:
         v = float(value)
@@ -1919,6 +2056,10 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "scenario_normalization_reference_cache": getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE_CACHE", {}),
             "cbo_reference_calibration_rounds": int(getattr(CFG, "CBO_REFERENCE_CALIBRATION_ROUNDS", 30)),
             "cbo_reference_min_rounds": int(getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5)),
+            "cbo_shared_reference_policy": str(getattr(CFG, "CBO_SHARED_REFERENCE_POLICY", "fixed_probe")),
+            "cbo_shared_reference_warmup_rounds": int(getattr(CFG, "CBO_SHARED_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5))),
+            "cbo_reference_source_method_key": str(getattr(CFG, "CBO_REFERENCE_SOURCE_METHOD_KEY", "")),
+            "cbo_shared_reference_active_source_key": str(getattr(CFG, "CBO_SHARED_REFERENCE_ACTIVE_SOURCE_KEY", "")),
             "cbo_reference_stat": str(getattr(CFG, "CBO_REFERENCE_STAT", "median")),
             "cbo_reference_trim_pct": float(getattr(CFG, "CBO_REFERENCE_TRIM_PCT", 0.1)),
             "cbo_objective_mode": str(getattr(CFG, "CBO_OBJECTIVE_MODE", "eval_cost")),
@@ -2529,7 +2670,20 @@ def run_scenario_method_experiments(repeat_runs=1, selected_keys=None, output_di
     groups = apply_history_policy_override(groups)
     groups = apply_cbo_stability_policy_override(groups)
     groups = apply_alpha_direct_fixed_theta_override(groups)
-    prepare_shared_scenario_normalization_reference(groups, output_dir=SCENARIO_SAVE_DIR)
+    use_cbo_first_reference = _cbo_first_reference_enabled(groups)
+    cbo_reference_source_key, _ = _choose_cbo_reference_source_group(groups)
+    if use_cbo_first_reference:
+        _prepare_cbo_first_reference_plan(output_dir=SCENARIO_SAVE_DIR)
+        CFG.CBO_SHARED_REFERENCE_ACTIVE_SOURCE_KEY = str(cbo_reference_source_key)
+        print(
+            f"[ScenarioReference] policy=cbo_first source={cbo_reference_source_key} "
+            f"warmup_rounds={int(getattr(CFG, 'CBO_SHARED_REFERENCE_WARMUP_ROUNDS', getattr(CFG, 'CBO_REFERENCE_MIN_ROUNDS', 5)))} "
+            f"total_bo_iterations={int(CFG.BO_ITERATIONS)}",
+            flush=True,
+        )
+    else:
+        CFG.CBO_SHARED_REFERENCE_ACTIVE_SOURCE_KEY = ""
+        prepare_shared_scenario_normalization_reference(groups, output_dir=SCENARIO_SAVE_DIR)
     _write_refactor_config_snapshot(SCENARIO_SAVE_DIR, selected_keys=selected_keys, groups=groups)
     group_logs = {k: {"label": v["label"], "logs": []} for k, v in groups.items()}
     # v6.2 runtime logging: saved incrementally after each method finishes.
@@ -2539,13 +2693,20 @@ def run_scenario_method_experiments(repeat_runs=1, selected_keys=None, output_di
     for run_idx in range(max(1, repeat_runs)):
         seed = CFG.BASE_SEED + run_idx
         print(f"[Repeat {run_idx + 1}/{max(1, repeat_runs)}] seed={seed}")
-        for group_key, group_cfg in groups.items():
+        run_group_keys = list(groups.keys())
+        if use_cbo_first_reference and cbo_reference_source_key in groups:
+            run_group_keys = [cbo_reference_source_key] + [k for k in run_group_keys if k != cbo_reference_source_key]
+        for group_key in run_group_keys:
+            group_cfg = groups[group_key]
             method_t0 = time.perf_counter()
             log = run_scenario_group(seed, group_key, group_cfg)
             if bool(getattr(CFG, "DYNAMIC_SCENARIO_ACTIVE", False)):
                 annotate_log_with_dynamic_phases(log, getattr(CFG, "DYNAMIC_PHASE_PLAN", []))
             method_elapsed = time.perf_counter() - method_t0
             group_logs[group_key]["logs"].append(log)
+            if use_cbo_first_reference and group_key == cbo_reference_source_key:
+                _publish_cbo_references_from_log(log, group_key, output_dir=SCENARIO_SAVE_DIR)
+                _write_refactor_config_snapshot(SCENARIO_SAVE_DIR, selected_keys=selected_keys, groups=groups)
 
             agent_kwargs = group_cfg.get("agent_kwargs", {}) or {}
             try:
