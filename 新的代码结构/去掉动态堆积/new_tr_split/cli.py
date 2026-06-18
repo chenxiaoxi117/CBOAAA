@@ -156,6 +156,7 @@ if __name__ == "__main__":
     parser.add_argument("--bo-recent-window", type=int, default=getattr(CFG, "DEFAULT_BO_RECENT_WINDOW", 80), help="recent/recent_confidence 模式保留最近多少个BO样本；备份版默认80")
     parser.add_argument("--bo-confidence-min", type=float, default=None, help="confidence/recent_confidence 模式下保留样本的最低反馈可信度")
     parser.add_argument("--bo-confidence-min-samples", type=int, default=None, help="可信过滤后至少保留多少样本，不足时自动使用高可信+最近样本兜底")
+    parser.add_argument("--cbo-recent-window", type=int, default=None, help="Override CBO method recent/recent_confidence window only; BO recent window is unchanged")
     parser.add_argument("--cbo-history-select-mode", choices=["recent", "recent_context", "recent_context_elite", "hybrid", "state_gated_kernel"], default=getattr(CFG, "DEFAULT_CBO_HISTORY_SELECT_MODE", "recent"), help="CBO-only stability history selection mode")
     parser.add_argument("--cbo-context-k", type=int, default=getattr(CFG, "DEFAULT_CBO_CONTEXT_K", 50), help="CBO context-nearest historical sample count")
     parser.add_argument("--cbo-elite-k", type=int, default=getattr(CFG, "DEFAULT_CBO_ELITE_K", 20), help="CBO robust elite theta-region count")
@@ -401,6 +402,9 @@ if __name__ == "__main__":
     if args.bo_confidence_min_samples is not None:
         CFG.BO_CONFIDENCE_MIN_SAMPLES = int(args.bo_confidence_min_samples)
         os.environ["BO_CONFIDENCE_MIN_SAMPLES"] = str(int(args.bo_confidence_min_samples))
+    if args.cbo_recent_window is not None:
+        CFG.CBO_RECENT_WINDOW = int(args.cbo_recent_window)
+        os.environ["CBO_RECENT_WINDOW"] = str(int(args.cbo_recent_window))
     CFG.CBO_HISTORY_SELECT_MODE = str(args.cbo_history_select_mode)
     CFG.CBO_CONTEXT_K = int(args.cbo_context_k)
     CFG.CBO_ELITE_K = int(args.cbo_elite_k)

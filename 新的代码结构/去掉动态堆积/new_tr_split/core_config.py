@@ -722,6 +722,9 @@ class ExperimentConfig:
     ALPHA_DIRECT_AI_BOUNDS = (0.50, 0.95)
     ALPHA_DIRECT_FIXED_THETA = None
     REDUCED7_ENERGY_SCALE_BOUNDS = None
+    # fixed5: BO/CBO share the same first 5 reduced7 probes inside the normal BO budget.
+    # none/off: keep the older per-agent random cold start.
+    REDUCED7_INITIAL_ANCHOR_MODE = "fixed5"
     SCHEDULER_SERVICE_LATENCY_WEIGHT = 1.0
     SCHEDULER_SERVICE_RISK_WEIGHT = 1.0
     SCHEDULER_SERVICE_QUEUE_WEIGHT = 1.0

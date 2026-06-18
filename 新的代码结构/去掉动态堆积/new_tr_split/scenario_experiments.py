@@ -242,7 +242,7 @@ def build_scenario_method_groups():
             "control_mode": "reduced7",
             "deploy_policy": "greedy",
             "method_family": "reduced7_global_energy_bo",
-            "agent_kwargs": reduced7_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="none"),
+            "agent_kwargs": reduced7_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="fixed5"),
         },
         "reduced7_cbo_lite_pressure_taskmix_counts": {
             "label": "Reduced7 CBO-Lite Pressure+TaskMix+Counts Global Energy",
@@ -255,7 +255,7 @@ def build_scenario_method_groups():
             "recent_window": 80,
             "confidence_min": 0.35,
             "confidence_min_samples": 12,
-            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="none", context_mode="pressure_taskmix_counts"),
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="pressure_taskmix_counts"),
         },
         "reduced9_fixed_mid": {
             "label": "Reduced9 Fixed Mid Task Energy",
@@ -735,6 +735,32 @@ def get_reduced7_control_bounds():
 REDUCED7_BOUNDS = get_reduced7_control_bounds()
 
 
+def reduced7_initial_anchor_points(anchor_mode=None):
+    """Return shared reduced7 initial probes for fair BO/CBO cold-start comparison."""
+    mode = str(anchor_mode if anchor_mode is not None else getattr(CFG, "REDUCED7_INITIAL_ANCHOR_MODE", "fixed5") or "fixed5").strip().lower()
+    if mode in {"none", "off", "false", "0", "random", "cold", "cold_start", "no_anchor"}:
+        return []
+    energy_lo, energy_hi = get_reduced7_energy_scale_bounds()
+    energy_mid = 0.5 * (float(energy_lo) + float(energy_hi))
+    anchors = [
+        # Balanced baseline.
+        [2.55, 2.55, 2.55, 1.00, 1.00, 0.50, energy_mid],
+        # Energy-saving probe.
+        [1.60, 1.60, 1.60, 1.20, 1.20, 0.50, float(energy_lo)],
+        # Low-latency / high-service probe.
+        [4.20, 4.20, 4.20, 1.00, 1.00, 0.50, energy_mid],
+        # Queue/risk conservative probe.
+        [3.00, 3.00, 3.00, 3.00, 3.00, 0.35, energy_mid],
+        # Cloud-favoring probe.
+        [3.20, 3.20, 3.20, 1.50, 1.50, 0.85, energy_mid],
+    ]
+    low, high = get_reduced7_control_bounds()
+    return [
+        [float(np.clip(float(v), float(low[i]), float(high[i]))) for i, v in enumerate(theta)]
+        for theta in anchors
+    ]
+
+
 REDUCED9_FEATURE_NAMES = [
     "W_RT_Latency", "W_Batch_Latency", "W_AI_Latency",
     "W_RT_Energy", "W_Batch_Energy", "W_AI_Energy",
@@ -807,6 +833,7 @@ def reduced9_to_full_theta(theta9):
 def reduced7_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="none", context_mode=None):
     context_dim = len(lite_context_feature_names(context_mode)) if context_mode else (len(CFG.CONTEXT_FEATURE_NAMES) if use_context else 0)
     context_bounds = lite_context_bounds(context_mode) if context_mode else (CFG.CONTEXT_BOUNDS if use_context else None)
+    anchors = reduced7_initial_anchor_points(anchor_mode)
     return {
         "dim": len(REDUCED7_FEATURE_NAMES),
         "bounds": get_reduced7_control_bounds(),
@@ -816,7 +843,7 @@ def reduced7_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode
         "use_trust_region": bool(use_trust_region),
         "context_dim": context_dim,
         "context_bounds": context_bounds,
-        "anchor_points": [],
+        "anchor_points": anchors,
     }
 
 
@@ -2083,6 +2110,8 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "alpha_direct_effective_bounds": get_alpha_direct_control_bounds(),
             "reduced7_energy_scale_bounds": getattr(CFG, "REDUCED7_ENERGY_SCALE_BOUNDS", None),
             "reduced7_effective_bounds": get_reduced7_control_bounds(),
+            "reduced7_initial_anchor_mode": str(getattr(CFG, "REDUCED7_INITIAL_ANCHOR_MODE", "fixed5")),
+            "reduced7_initial_anchor_points": reduced7_initial_anchor_points("fixed5"),
             "scheduler_service_latency_weight": float(getattr(CFG, "SCHEDULER_SERVICE_LATENCY_WEIGHT", 1.0)),
             "scheduler_service_risk_weight": float(getattr(CFG, "SCHEDULER_SERVICE_RISK_WEIGHT", 1.0)),
             "scheduler_service_queue_weight": float(getattr(CFG, "SCHEDULER_SERVICE_QUEUE_WEIGHT", 1.0)),
@@ -2123,6 +2152,7 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "method_history_policy_map": method_history_policy_map(groups or {}),
             "bo_history_mode": str(getattr(CFG, "BO_HISTORY_MODE", "all")),
             "bo_recent_window": int(getattr(CFG, "BO_RECENT_WINDOW", 80)),
+            "cbo_recent_window": getattr(CFG, "CBO_RECENT_WINDOW", None),
             "bo_confidence_min": float(getattr(CFG, "BO_CONFIDENCE_MIN", 0.35)),
             "bo_confidence_min_samples": int(getattr(CFG, "BO_CONFIDENCE_MIN_SAMPLES", 12)),
             "cbo_history_select_mode": str(getattr(CFG, "CBO_HISTORY_SELECT_MODE", "recent")),

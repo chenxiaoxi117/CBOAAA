@@ -89,6 +89,15 @@ def _recent_window_arg():
     return _cfg_recent_window()
 
 
+def _cbo_recent_window_arg():
+    if not _argv_has_option("--cbo-recent-window"):
+        return None
+    try:
+        return int(getattr(CFG, "CBO_RECENT_WINDOW"))
+    except Exception:
+        return None
+
+
 def apply_history_policy_override(groups):
     """Apply CLI history settings to CBO-like methods only.
 
@@ -98,7 +107,9 @@ def apply_history_policy_override(groups):
     unaffected. If no CLI flag was explicitly supplied, preserve method defaults.
     """
     mode = _history_mode_arg()
-    window = _recent_window_arg()
+    window = _cbo_recent_window_arg()
+    if window is None:
+        window = _recent_window_arg()
     if mode is None and window is None:
         for group_key, group_cfg in (groups or {}).items():
             group_cfg.setdefault("history_override_source", "method_default")
