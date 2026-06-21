@@ -1655,6 +1655,14 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "macro_pool_max_similarity", "macro_pool_p50_similarity", "macro_pool_p90_similarity",
             "selected_from_macro_pool_count", "selected_outside_macro_pool_count",
             "macro_gate_fallback_used", "macro_gate_fallback_reason",
+            "external_gate_mode", "external_gate_enabled", "external_gate_threshold",
+            "external_gate_topk", "external_gate_min_samples", "external_gate_raw_count",
+            "external_gate_passed_count", "external_gate_selected_count",
+            "external_gate_fallback_used", "external_gate_fallback_reason",
+            "external_similarity_max", "external_similarity_mean", "external_similarity_p50",
+            "selected_external_similarity_mean", "selected_external_similarity_min",
+            "selected_external_similarity_max", "external_gate_current_context",
+            "external_context_feature_names",
             "context_selection_source_pool", "elite_selection_source_pool", "tr_anchor_source_pool",
             "selected_candidate_source", "selected_candidate_mu", "selected_candidate_sigma",
             "selected_candidate_acq", "selected_candidate_score", "selected_candidate_beta_eff",
@@ -2527,10 +2535,12 @@ LITE_CONTEXT_FEATURE_NAMES = [
     "prev_unfinished_rate",         # 15
     "recent_unfinished_rate_mean",  # 16
     "unfinished_rate_trend",        # 17
+    "start_backlog_norm",           # 18: start_backlog normalized by expected window arrivals
+    "start_queue_total_norm",       # 19: start_queue_total normalized by expected window arrivals
 ]
 LITE_CONTEXT_BOUNDS = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
-    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+    [5.0, 500.0, 1.0, 1.0, 500.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
 ]
 
 # v6.1: CBO-lite context 消融配置。
@@ -2575,6 +2585,14 @@ LITE_CONTEXT_MODE_SPECS = {
     "pressure_taskmix_counts_unfinished": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
     "unfinished_context": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
     "puc": {"label": "pressure_unfinished_context", "indices": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 17]},
+
+    # V1.1 two-level CBO: external context gates samples; internal context enters GP.
+    "internal_pressure4": {"label": "internal_pressure4", "indices": [18, 3, 15, 17]},
+    "internal_pressure6": {"label": "internal_pressure6", "indices": [18, 19, 2, 3, 15, 17]},
+    "pressure_internal4": {"label": "internal_pressure4", "indices": [18, 3, 15, 17]},
+    "pressure_internal6": {"label": "internal_pressure6", "indices": [18, 19, 2, 3, 15, 17]},
+    "cbo_internal4": {"label": "internal_pressure4", "indices": [18, 3, 15, 17]},
+    "cbo_internal6": {"label": "internal_pressure6", "indices": [18, 19, 2, 3, 15, 17]},
 
     # 新增：全量扩展 context。维度高，只建议小规模对照。
     "full_taskmix": {"label": "full_taskmix", "indices": [0, 1, 2, 3, 4, 5, 6, 7, 8]},
@@ -3390,6 +3408,54 @@ def _unfinished_context_features(fac):
     return prev_rate, recent_mean, float(np.clip(trend, -1.0, 1.0)), status
 
 
+EXTERNAL_CONTEXT_FEATURE_NAMES = [
+    "arrival_rate_recent",
+    "cfg_rt_prob",
+    "cfg_batch_prob",
+    "cfg_ai_prob",
+]
+
+
+def _current_arrival_rate_for_context(fac, metrics=None):
+    metrics = metrics or {}
+    try:
+        arrival_rate = float(metrics.get("arrival_rate", 0.0))
+    except Exception:
+        arrival_rate = 0.0
+    if not np.isfinite(arrival_rate) or arrival_rate <= 0.0:
+        try:
+            lam, _ = fac.workload._get_lambda(getattr(fac, "current_time", 0.0))
+            arrival_rate = float(lam)
+        except Exception:
+            arrival_rate = float(getattr(CFG, "BATCH_POISSON_LAMBDA", 1.0))
+    return float(np.clip(arrival_rate, 0.0, 5.0))
+
+
+def _context_count_ref(fac, arrival_rate):
+    try:
+        return max(1.0, float(arrival_rate) * float(getattr(CFG, "BO_INTERVAL", 1.0)))
+    except Exception:
+        return 1.0
+
+
+def build_external_context_vector(fac, base_context=None):
+    try:
+        m = fac.scenario_monitor.compute_metrics(fac.current_time)
+    except Exception:
+        m = {}
+    arrival_rate = _current_arrival_rate_for_context(fac, metrics=m)
+    try:
+        cfg_probs = get_task_type_probs_at_time(getattr(fac, "current_time", None))
+    except Exception:
+        cfg_probs = _normalize_task_probs(getattr(CFG, "TASK_TYPE_PROBS", {"RT": 1/3, "Batch": 1/3, "AI": 1/3}))
+    return [
+        float(np.clip(arrival_rate, 0.0, 5.0)),
+        float(np.clip(cfg_probs.get("RT", 0.0), 0.0, 1.0)),
+        float(np.clip(cfg_probs.get("Batch", 0.0), 0.0, 1.0)),
+        float(np.clip(cfg_probs.get("AI", 0.0), 0.0, 1.0)),
+    ]
+
+
 def build_lite_context_vector(fac, base_context=None):
     """构造 CBO-lite 的窗口开始状态。
 
@@ -3399,11 +3465,14 @@ def build_lite_context_vector(fac, base_context=None):
         m = fac.scenario_monitor.compute_metrics(fac.current_time)
     except Exception:
         m = {}
-    arrival_rate = float(m.get("arrival_rate", 0.0))
+    arrival_rate = _current_arrival_rate_for_context(fac, metrics=m)
     nodes = list(getattr(fac, "nodes", []))
     utils = [float(n.utilization()) for n in nodes] if nodes else [0.0]
     backlog = float(_node_count_backlog(nodes))
     queue_total = float(_node_count_ready_queue(nodes))
+    count_ref = _context_count_ref(fac, arrival_rate)
+    backlog_norm = float(np.clip(backlog / count_ref, 0.0, 1.0))
+    queue_total_norm = float(np.clip(queue_total / count_ref, 0.0, 1.0))
     edge_nodes = [n for n in nodes if not getattr(n, "is_cloud", False)]
     cloud_nodes = [n for n in nodes if getattr(n, "is_cloud", False)]
     edge_pressure = _pressure_for_nodes(edge_nodes)
@@ -3427,13 +3496,6 @@ def build_lite_context_vector(fac, base_context=None):
     prev_total = max(0.0, prev_rt + prev_batch + prev_ai)
     # 参考值约等于 λ*BO_INTERVAL，用于把上一窗口任务数压到 0~1。
     # 如果当前 m 里没有 arrival_rate，则回退到 CFG 当前 λ 或 1.0。
-    count_ref = max(1.0, float(arrival_rate) * float(getattr(CFG, "BO_INTERVAL", 1.0)))
-    if count_ref <= 1.0:
-        try:
-            lam, _ = fac.workload._get_lambda(getattr(fac, "current_time", 0.0))
-            count_ref = max(1.0, float(lam) * float(getattr(CFG, "BO_INTERVAL", 1.0)))
-        except Exception:
-            count_ref = max(1.0, float(getattr(CFG, "BO_INTERVAL", 1.0)))
     prev_rt_norm = float(np.clip(prev_rt / count_ref, 0.0, 1.0))
     prev_batch_norm = float(np.clip(prev_batch / count_ref, 0.0, 1.0))
     prev_ai_norm = float(np.clip(prev_ai / count_ref, 0.0, 1.0))
@@ -3472,6 +3534,8 @@ def build_lite_context_vector(fac, base_context=None):
         prev_unfinished_rate,
         recent_unfinished_rate_mean,
         unfinished_rate_trend,
+        backlog_norm,
+        queue_total_norm,
     ]
 
 
@@ -3582,6 +3646,14 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_robust_std_weight = float(group_cfg.get("cbo_robust_std_weight", _cfg_cbo_float("CBO_ROBUST_STD_WEIGHT", 0.5)))
     agent.cbo_theta_merge_eps = float(group_cfg.get("cbo_theta_merge_eps", _cfg_cbo_float("CBO_THETA_MERGE_EPS", 0.05)))
     agent.cbo_context_sim_threshold = float(group_cfg.get("cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+    agent.cbo_external_gate_mode = str(group_cfg.get("cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) if agent.is_cbo_stability_enabled else "off").strip().lower()
+    agent.cbo_external_gate_threshold = float(group_cfg.get("cbo_external_gate_threshold", _cfg_cbo_float("CBO_EXTERNAL_GATE_THRESHOLD", 0.35)))
+    agent.cbo_external_gate_topk = int(group_cfg.get("cbo_external_gate_topk", _cfg_cbo_int("CBO_EXTERNAL_GATE_TOPK", 240)))
+    agent.cbo_external_gate_min_samples = int(group_cfg.get("cbo_external_gate_min_samples", _cfg_cbo_int("CBO_EXTERNAL_GATE_MIN_SAMPLES", 12)))
+    agent.cbo_external_gate_recent_keep = int(group_cfg.get("cbo_external_gate_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_GATE_RECENT_KEEP", 0)))
+    agent.cbo_external_lengthscale_intensity = float(group_cfg.get("cbo_external_lengthscale_intensity", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_INTENSITY", 0.75)))
+    agent.cbo_external_lengthscale_taskmix = float(group_cfg.get("cbo_external_lengthscale_taskmix", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25)))
+    agent._active_external_context = None
     agent.cbo_state_kernel_topk = int(group_cfg.get("cbo_state_kernel_topk", _cfg_cbo_int("CBO_STATE_KERNEL_TOPK", 100)))
     agent.cbo_state_kernel_min_rows = int(group_cfg.get("cbo_state_kernel_min_rows", _cfg_cbo_int("CBO_STATE_KERNEL_MIN_ROWS", 20)))
     agent.cbo_state_kernel_recent_keep = int(group_cfg.get("cbo_state_kernel_recent_keep", _cfg_cbo_int("CBO_STATE_KERNEL_RECENT_KEEP", 20)))
@@ -3710,6 +3782,10 @@ def agent_tell_with_feedback_meta(agent, theta, cost, state=None, context=None, 
             rec["group_key"] = str(group_key) if group_key is not None else None
             rec["history_mode"] = str(getattr(agent, "history_mode", _cfg_history_mode()))
             rec["feedback_metrics_meta"] = dict(parts or {})
+            ext_ctx = getattr(agent, "_active_external_context", None)
+            if ext_ctx is not None:
+                rec["external_context"] = [float(x) for x in list(ext_ctx)]
+                rec["external_context_feature_names"] = list(EXTERNAL_CONTEXT_FEATURE_NAMES)
             if isinstance(metrics, dict):
                 rec["metrics"] = dict(metrics)
                 for macro_key in [
@@ -3774,6 +3850,112 @@ def _cbo_context_similarity(agent, context, rec):
         return float(agent._context_similarity(context, rec.get("context")))
     except Exception:
         return 0.0
+
+
+def _cbo_external_similarity(agent, current_external, rec):
+    if current_external is None:
+        return 1.0
+    rec_external = rec.get("external_context") if isinstance(rec, dict) else None
+    if rec_external is None:
+        return 0.0
+    try:
+        a = np.asarray(list(current_external), dtype=float)
+        b = np.asarray(list(rec_external), dtype=float)
+        n = min(len(a), len(b), 4)
+        if n <= 0:
+            return 0.0
+        a = a[:n]
+        b = b[:n]
+        lengths = np.asarray([
+            float(getattr(agent, "cbo_external_lengthscale_intensity", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_INTENSITY", 0.75))),
+            float(getattr(agent, "cbo_external_lengthscale_taskmix", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25))),
+            float(getattr(agent, "cbo_external_lengthscale_taskmix", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25))),
+            float(getattr(agent, "cbo_external_lengthscale_taskmix", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25))),
+        ], dtype=float)[:n]
+        lengths = np.maximum(np.abs(lengths), 1e-9)
+        diff = (a - b) / lengths
+        return float(np.exp(-0.5 * float(np.dot(diff, diff))))
+    except Exception:
+        return 0.0
+
+
+def _cbo_external_gate_records(agent, records, recent_window=None, min_keep=None):
+    records = list(records or [])
+    mode = str(getattr(agent, "cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) or "off").strip().lower()
+    current_external = getattr(agent, "_active_external_context", None)
+    if mode in {"off", "none", "disabled"} or current_external is None or not records:
+        agent._last_external_gate_debug = {
+            "external_gate_mode": mode,
+            "external_gate_enabled": False,
+            "external_gate_raw_count": int(len(records)),
+            "external_gate_selected_count": int(len(records)),
+            "external_gate_passed_count": 0,
+            "external_gate_fallback_used": False,
+            "external_gate_current_context": list(current_external) if current_external is not None else None,
+            "external_context_feature_names": list(EXTERNAL_CONTEXT_FEATURE_NAMES),
+        }
+        return records
+
+    threshold = float(getattr(agent, "cbo_external_gate_threshold", _cfg_cbo_float("CBO_EXTERNAL_GATE_THRESHOLD", 0.35)))
+    topk = max(1, int(getattr(agent, "cbo_external_gate_topk", _cfg_cbo_int("CBO_EXTERNAL_GATE_TOPK", 240))))
+    min_samples = max(1, int(getattr(agent, "cbo_external_gate_min_samples", _cfg_cbo_int("CBO_EXTERNAL_GATE_MIN_SAMPLES", 12))))
+    recent_keep = max(0, int(getattr(agent, "cbo_external_gate_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_GATE_RECENT_KEEP", 0))))
+    if recent_window is not None:
+        topk = max(topk, min(int(recent_window), len(records)))
+    if min_keep is not None:
+        min_samples = max(min_samples, int(min_keep))
+
+    scored = []
+    for rec in records:
+        sim = _cbo_external_similarity(agent, current_external, rec)
+        rec2 = dict(rec)
+        rec2["_cbo_external_similarity"] = float(sim)
+        scored.append((float(sim), int(rec2.get("bo_iter", -1) or -1), rec2))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    passed = [r for sim, _, r in scored if sim >= threshold]
+    fallback_used = False
+    fallback_reason = ""
+    if len(passed) >= min_samples:
+        selected = passed[:topk]
+    else:
+        selected = [r for _, _, r in scored[:topk]]
+        fallback_used = True
+        fallback_reason = f"passed_rows_{len(passed)}_lt_min_{min_samples}"
+
+    if recent_keep > 0:
+        selected_keys = {_cbo_record_identity(agent, r) for r in selected}
+        for rec in list(records)[-recent_keep:]:
+            key = _cbo_record_identity(agent, rec)
+            if key not in selected_keys:
+                rec2 = dict(rec)
+                rec2["_cbo_external_similarity"] = _cbo_external_similarity(agent, current_external, rec2)
+                selected.append(rec2)
+                selected_keys.add(key)
+
+    selected.sort(key=lambda r: int(r.get("bo_iter", -1) or -1))
+    sims = [sim for sim, _, _ in scored]
+    sel_sims = [float(r.get("_cbo_external_similarity", np.nan)) for r in selected if np.isfinite(float(r.get("_cbo_external_similarity", np.nan)))]
+    agent._last_external_gate_debug = {
+        "external_gate_mode": mode,
+        "external_gate_enabled": True,
+        "external_gate_threshold": float(threshold),
+        "external_gate_topk": int(topk),
+        "external_gate_min_samples": int(min_samples),
+        "external_gate_raw_count": int(len(records)),
+        "external_gate_passed_count": int(len(passed)),
+        "external_gate_selected_count": int(len(selected)),
+        "external_gate_fallback_used": bool(fallback_used),
+        "external_gate_fallback_reason": str(fallback_reason),
+        "external_similarity_max": float(max(sims)) if sims else np.nan,
+        "external_similarity_mean": float(np.mean(sims)) if sims else np.nan,
+        "external_similarity_p50": float(np.percentile(sims, 50)) if sims else np.nan,
+        "selected_external_similarity_mean": float(np.mean(sel_sims)) if sel_sims else np.nan,
+        "selected_external_similarity_min": float(np.min(sel_sims)) if sel_sims else np.nan,
+        "selected_external_similarity_max": float(np.max(sel_sims)) if sel_sims else np.nan,
+        "external_gate_current_context": list(current_external),
+        "external_context_feature_names": list(EXTERNAL_CONTEXT_FEATURE_NAMES),
+    }
+    return selected
 
 
 def _cbo_all_records(agent):
@@ -4394,11 +4576,13 @@ def _refactor_collect_samples(self, state=None):
             "elite_best_mean_cost": elite.get("mean_cost"),
             "elite_best_std_cost": elite.get("std_cost"),
         }
+        self.last_history_debug.update(dict(getattr(self, "_last_external_gate_debug", {}) or {}))
         self.last_history_debug.update(extra_state_kernel_debug)
 
     mode = str(getattr(self, "history_mode", _cfg_history_mode("all")) or "all").strip().lower()
     macro_mode = str(getattr(self, "cbo_macro_gate_mode", _cfg_cbo_str("CBO_MACRO_GATE_MODE", "off")) or "off").strip().lower()
-    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel"} or macro_mode != "off"
+    external_mode = str(getattr(self, "cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) or "off").strip().lower()
+    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel"} or macro_mode != "off" or external_mode not in {"off", "none", "disabled"}
     if mode in {"all", "legacy", "none"} and not selector_requires_pool:
         set_debug(records)
         return records
@@ -4406,12 +4590,14 @@ def _refactor_collect_samples(self, state=None):
     # 按插入顺序近似时间顺序。local_recent 本身已经是时间顺序，archive 在前，recent 在后。
     min_keep = max(2, int(getattr(self, "confidence_min_samples", _cfg_confidence_min_samples())))
     min_conf = float(getattr(self, "confidence_min", _cfg_confidence_min()))
+    records = _cbo_external_gate_records(self, records, recent_window=recent_window, min_keep=min_keep)
 
     if select_mode == "state_gated_kernel":
-        all_records = _cbo_all_records(self)
+        all_records = _cbo_external_gate_records(self, _cbo_all_records(self), recent_window=recent_window, min_keep=min_keep)
         cfg_sk = _cbo_state_kernel_cfg(self)
         recent_keep = int(cfg_sk["recent_keep"])
         recent = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_keep:]] if recent_keep > 0 else []
+        recent = _cbo_external_gate_records(self, recent, recent_window=recent_keep, min_keep=0) if recent else []
         current_feat = _cbo_state_kernel_features(self, context=context, all_records=all_records, current=True)
         scored = []
         reject_reasons = {}
@@ -4554,7 +4740,8 @@ def _refactor_collect_samples(self, state=None):
 
     if select_mode in {"recent_context", "recent_context_elite", "hybrid"} or macro_mode != "off":
         recent = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_window:]]
-        all_records = _cbo_all_records(self)
+        recent = _cbo_external_gate_records(self, recent, recent_window=recent_window, min_keep=min_keep) if recent else []
+        all_records = _cbo_external_gate_records(self, _cbo_all_records(self), recent_window=recent_window, min_keep=min_keep)
         threshold = float(getattr(self, "cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
         context_k = max(0, int(getattr(self, "cbo_context_k", _cfg_cbo_int("CBO_CONTEXT_K", 50))))
         elite_k = max(0, int(getattr(self, "cbo_elite_k", _cfg_cbo_int("CBO_ELITE_K", 20))))
@@ -6057,12 +6244,16 @@ def _cbo_warm_record_from_row(agent, row):
     if not isinstance(theta, (list, tuple)):
         theta = _cbo_ws_json(row.get("deployed_theta"), None)
     context = _cbo_ws_json(row.get("context_vector"), None)
+    external_context = _cbo_ws_json(row.get("external_context"), None)
     cost = _cbo_ws_float(row.get("BO_Training_Cost"), np.nan)
     if not np.isfinite(cost):
         cost = _cbo_ws_float(row.get("Eval_Cost"), np.nan)
     if not isinstance(theta, (list, tuple)) or not np.isfinite(cost):
         return None
     rec = agent._pack_sample(list(theta), -float(cost), state=None, context=context)
+    if isinstance(external_context, (list, tuple)):
+        rec["external_context"] = [float(x) for x in list(external_context)]
+        rec["external_context_feature_names"] = list(_cbo_ws_json(row.get("external_context_feature_names"), EXTERNAL_CONTEXT_FEATURE_NAMES) or EXTERNAL_CONTEXT_FEATURE_NAMES)
     rec["feedback_confidence"] = 1.0
     rec["bo_iter"] = _cbo_ws_int(row.get("iteration"), None)
     rec["group_key"] = str(row.get("selected_key", row.get("method", "warm_source")) or "warm_source")
@@ -6258,6 +6449,8 @@ def export_bo_warm_history_csv(group_logs, output_dir=None, selected_keys=None, 
                     "task_probs": _cbo_warm_json_dump(task_probs),
                     "context_vector": _cbo_warm_json_dump(_cbo_warm_log_get(log, "context_vector", i, None)),
                     "context_feature_names": _cbo_warm_json_dump(list(ctx_names or [])),
+                    "external_context": _cbo_warm_json_dump(_cbo_warm_log_get(log, "external_context_vector", i, None)),
+                    "external_context_feature_names": _cbo_warm_json_dump(_cbo_warm_log_get(log, "external_context_feature_names", i, EXTERNAL_CONTEXT_FEATURE_NAMES)),
                     "control_theta": _cbo_warm_json_dump(control_theta),
                     "deployed_theta": _cbo_warm_json_dump(deployed_theta),
                     "Alpha_Direct_Control_Vector_6D": _cbo_warm_json_dump(alpha_theta),
@@ -6419,6 +6612,7 @@ def run_scenario_group(seed, group_key, group_cfg):
         state, _, _ = fac.scenario_monitor.get_state(fac.current_time)
         base_ctx = fac.scenario_monitor.get_context_vector(fac.current_time)
         ctx = build_context_for_group(fac, group_cfg, base_context=base_ctx)
+        external_ctx = build_external_context_vector(fac, base_context=base_ctx)
         safe_info = {"deploy_policy": "fixed", "deploy_source": "fixed_theta", "explore_used": 0, "posterior_mu": None, "posterior_sigma": None, "candidate_count_safe": None}
         safe_info.update(warm_start_status)
 
@@ -6429,6 +6623,11 @@ def run_scenario_group(seed, group_key, group_cfg):
         else:
             ask_state = state if getattr(fac.agent, "use_state_partition", False) else None
             ask_ctx = ctx if getattr(fac.agent, "use_context", False) else None
+            try:
+                fac.agent._active_external_context = list(external_ctx)
+                fac.agent._active_external_context_feature_names = list(EXTERNAL_CONTEXT_FEATURE_NAMES)
+            except Exception:
+                pass
             theta_control, safe_info = _safebo_select_theta(fac.agent, state=ask_state, context=ask_ctx, group_cfg=group_cfg)
             safe_info.update(warm_start_status)
             safe_info.setdefault("cbo_warm_start_used_rows", safe_info.get("selected_warm_rows_count", 0))
@@ -6489,6 +6688,8 @@ def run_scenario_group(seed, group_key, group_cfg):
             eval_context=ask_ctx if fac.agent is not None else ctx,
             feedback_control=theta_control,
         )
+        fac.perf_log.setdefault("external_context_vector", []).append(list(external_ctx))
+        safe_info.setdefault("external_context_feature_names", list(EXTERNAL_CONTEXT_FEATURE_NAMES))
         if paired_shadow is not None:
             try:
                 baseline_key, baseline_theta_control, baseline_metrics = _run_paired_shadow_baseline(
