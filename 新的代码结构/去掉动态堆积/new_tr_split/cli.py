@@ -111,6 +111,10 @@ if __name__ == "__main__":
     parser.add_argument("--alpha-direct-batch-bounds", default=getattr(CFG, "ALPHA_DIRECT_BATCH_BOUNDS", None), help="alpha_direct Batch BO bounds, formatted as low,high")
     parser.add_argument("--alpha-direct-ai-bounds", default=getattr(CFG, "ALPHA_DIRECT_AI_BOUNDS", None), help="alpha_direct AI BO bounds, formatted as low,high")
     parser.add_argument("--alpha-direct-fixed-theta", type=str, default=None, help="Fixed alpha_direct 6D theta for cbo-alpha-direct/cbo-alpha-direct-no-risk runs")
+    parser.add_argument("--reduced7-latency-weight-bounds", default=getattr(CFG, "REDUCED7_LATENCY_WEIGHT_BOUNDS", None), help="reduced7 latency-weight bounds, formatted as low,high")
+    parser.add_argument("--reduced7-queue-weight-bounds", default=getattr(CFG, "REDUCED7_QUEUE_WEIGHT_BOUNDS", None), help="reduced7 W_Queue bounds, formatted as low,high")
+    parser.add_argument("--reduced7-risk-scale-bounds", default=getattr(CFG, "REDUCED7_RISK_SCALE_BOUNDS", None), help="reduced7 W_Risk_Scale bounds, formatted as low,high")
+    parser.add_argument("--reduced7-cloud-gate-bounds", default=getattr(CFG, "REDUCED7_CLOUD_GATE_BOUNDS", None), help="reduced7 Cloud_Gate bounds, formatted as low,high")
     parser.add_argument("--reduced7-energy-scale-bounds", default=getattr(CFG, "REDUCED7_ENERGY_SCALE_BOUNDS", None), help="reduced7 W_Energy_Scale BO bounds, formatted as low,high, e.g. 0.5,3.0")
     parser.add_argument("--scheduler-service-latency-weight", type=float, default=1.0, help="alpha tradeoff 中 norm_l 的系数")
     parser.add_argument("--scheduler-service-risk-weight", type=float, default=1.0, help="alpha 外部 risk_w*norm_risk 惩罚项的额外系数")
@@ -270,7 +274,15 @@ if __name__ == "__main__":
     parser.add_argument("--cbo-prediction-guard-start-iter", type=int, default=getattr(CFG, "DEFAULT_CBO_PREDICTION_GUARD_START_ITER", 200), help="Earliest BO iteration where active prediction guard may change deployment")
     parser.add_argument("--cbo-prediction-guard-bias-weight", type=float, default=getattr(CFG, "DEFAULT_CBO_PREDICTION_GUARD_BIAS_WEIGHT", 1.0), help="Positive prediction-bias weight in active prediction guard risk margin")
     parser.add_argument("--cbo-prediction-guard-mae-weight", type=float, default=getattr(CFG, "DEFAULT_CBO_PREDICTION_GUARD_MAE_WEIGHT", 0.5), help="MAE weight in active prediction guard risk margin")
-    parser.add_argument("--cbo-sigma-floor", type=float, default=getattr(CFG, "DEFAULT_CBO_SIGMA_FLOOR", 1e-6), help="Sigma floor for surprise calculation")
+    parser.add_argument("--cbo-sigma-calibration", choices=["on", "off"], default=getattr(CFG, "DEFAULT_CBO_SIGMA_CALIBRATION", "off"), help="Calibrate CBO posterior sigma from recent prediction residuals")
+    parser.add_argument("--cbo-sigma-calibration-buffer-size", type=int, default=getattr(CFG, "DEFAULT_CBO_SIGMA_CALIBRATION_BUFFER_SIZE", 50), help="Maximum recent residual/sigma pairs retained for calibration")
+    parser.add_argument("--cbo-sigma-calibration-min-samples", type=int, default=getattr(CFG, "DEFAULT_CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10), help="Minimum calibration rows before estimating sigma scale")
+    parser.add_argument("--cbo-sigma-calibration-use-in-acq", choices=["false", "soft", "true"], default=getattr(CFG, "DEFAULT_CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false"), help="Use raw, softly blended, or fully calibrated sigma in CBO acquisition")
+    parser.add_argument("--cbo-sigma-calibration-eta", type=float, default=getattr(CFG, "DEFAULT_CBO_SIGMA_CALIBRATION_ETA", 0.25), help="Soft-mode blend weight between raw and calibrated sigma")
+    parser.add_argument("--cbo-sigma-scale-default", type=float, default=getattr(CFG, "DEFAULT_CBO_SIGMA_SCALE_DEFAULT", 4.0), help="Default sigma scale before calibration is ready")
+    parser.add_argument("--cbo-sigma-scale-min", type=float, default=getattr(CFG, "DEFAULT_CBO_SIGMA_SCALE_MIN", 1.0), help="Minimum calibrated sigma scale")
+    parser.add_argument("--cbo-sigma-scale-max", type=float, default=getattr(CFG, "DEFAULT_CBO_SIGMA_SCALE_MAX", 6.0), help="Maximum calibrated sigma scale")
+    parser.add_argument("--cbo-sigma-floor", type=float, default=getattr(CFG, "DEFAULT_CBO_SIGMA_FLOOR", 0.03), help="Floor applied to calibrated posterior sigma")
     parser.add_argument("--cbo-radius-reset", type=float, default=getattr(CFG, "DEFAULT_CBO_RADIUS_RESET", 0.12), help="TR radius after residual/condition soft reset")
     parser.add_argument("--cbo-radius-min-stuck-rounds", type=int, default=getattr(CFG, "DEFAULT_CBO_RADIUS_MIN_STUCK_ROUNDS", 10), help="Rounds stuck near min radius before condition trigger")
     parser.add_argument("--cbo-rebound-window", type=int, default=getattr(CFG, "DEFAULT_CBO_REBOUND_WINDOW", 20), help="Recent window for cost rebound trigger")
@@ -346,12 +358,20 @@ if __name__ == "__main__":
     alpha_direct_batch_bounds = _parse_bounds_pair_arg(args.alpha_direct_batch_bounds, "--alpha-direct-batch-bounds")
     alpha_direct_ai_bounds = _parse_bounds_pair_arg(args.alpha_direct_ai_bounds, "--alpha-direct-ai-bounds")
     alpha_direct_fixed_theta = _parse_float_list_arg(args.alpha_direct_fixed_theta, "--alpha-direct-fixed-theta", 6)
+    reduced7_latency_weight_bounds = _parse_bounds_pair_arg(args.reduced7_latency_weight_bounds, "--reduced7-latency-weight-bounds")
+    reduced7_queue_weight_bounds = _parse_bounds_pair_arg(args.reduced7_queue_weight_bounds, "--reduced7-queue-weight-bounds")
+    reduced7_risk_scale_bounds = _parse_bounds_pair_arg(args.reduced7_risk_scale_bounds, "--reduced7-risk-scale-bounds")
+    reduced7_cloud_gate_bounds = _parse_bounds_pair_arg(args.reduced7_cloud_gate_bounds, "--reduced7-cloud-gate-bounds")
     reduced7_energy_scale_bounds = _parse_bounds_pair_arg(args.reduced7_energy_scale_bounds, "--reduced7-energy-scale-bounds")
     CFG.ALPHA_DIRECT_BOUNDS = alpha_direct_bounds
     CFG.ALPHA_DIRECT_RT_BOUNDS = alpha_direct_rt_bounds
     CFG.ALPHA_DIRECT_BATCH_BOUNDS = alpha_direct_batch_bounds
     CFG.ALPHA_DIRECT_AI_BOUNDS = alpha_direct_ai_bounds
     CFG.ALPHA_DIRECT_FIXED_THETA = alpha_direct_fixed_theta
+    CFG.REDUCED7_LATENCY_WEIGHT_BOUNDS = reduced7_latency_weight_bounds
+    CFG.REDUCED7_QUEUE_WEIGHT_BOUNDS = reduced7_queue_weight_bounds
+    CFG.REDUCED7_RISK_SCALE_BOUNDS = reduced7_risk_scale_bounds
+    CFG.REDUCED7_CLOUD_GATE_BOUNDS = reduced7_cloud_gate_bounds
     CFG.REDUCED7_ENERGY_SCALE_BOUNDS = reduced7_energy_scale_bounds
     CFG.SCHEDULER_SERVICE_LATENCY_WEIGHT = float(args.scheduler_service_latency_weight)
     CFG.SCHEDULER_SERVICE_RISK_WEIGHT = float(args.scheduler_service_risk_weight)
@@ -378,7 +398,9 @@ if __name__ == "__main__":
         flush=True,
     )
     print(
-        f"[REDUCED7-BOUNDS] energy_scale={CFG.REDUCED7_ENERGY_SCALE_BOUNDS}",
+        f"[REDUCED7-BOUNDS] latency={CFG.REDUCED7_LATENCY_WEIGHT_BOUNDS} "
+        f"queue={CFG.REDUCED7_QUEUE_WEIGHT_BOUNDS} risk={CFG.REDUCED7_RISK_SCALE_BOUNDS} "
+        f"cloud={CFG.REDUCED7_CLOUD_GATE_BOUNDS} energy_scale={CFG.REDUCED7_ENERGY_SCALE_BOUNDS}",
         flush=True,
     )
     print(
@@ -516,6 +538,14 @@ if __name__ == "__main__":
     CFG.CBO_PREDICTION_GUARD_START_ITER = int(args.cbo_prediction_guard_start_iter)
     CFG.CBO_PREDICTION_GUARD_BIAS_WEIGHT = float(args.cbo_prediction_guard_bias_weight)
     CFG.CBO_PREDICTION_GUARD_MAE_WEIGHT = float(args.cbo_prediction_guard_mae_weight)
+    CFG.CBO_SIGMA_CALIBRATION = str(args.cbo_sigma_calibration)
+    CFG.CBO_SIGMA_CALIBRATION_BUFFER_SIZE = int(args.cbo_sigma_calibration_buffer_size)
+    CFG.CBO_SIGMA_CALIBRATION_MIN_SAMPLES = int(args.cbo_sigma_calibration_min_samples)
+    CFG.CBO_SIGMA_CALIBRATION_USE_IN_ACQ = str(args.cbo_sigma_calibration_use_in_acq)
+    CFG.CBO_SIGMA_CALIBRATION_ETA = float(np.clip(args.cbo_sigma_calibration_eta, 0.0, 1.0))
+    CFG.CBO_SIGMA_SCALE_DEFAULT = float(args.cbo_sigma_scale_default)
+    CFG.CBO_SIGMA_SCALE_MIN = float(args.cbo_sigma_scale_min)
+    CFG.CBO_SIGMA_SCALE_MAX = float(args.cbo_sigma_scale_max)
     CFG.CBO_SIGMA_FLOOR = float(args.cbo_sigma_floor)
     CFG.CBO_RADIUS_RESET = float(args.cbo_radius_reset)
     CFG.CBO_RADIUS_MIN_STUCK_ROUNDS = int(args.cbo_radius_min_stuck_rounds)

@@ -721,7 +721,13 @@ class ExperimentConfig:
     ALPHA_DIRECT_BATCH_BOUNDS = (0.50, 0.90)
     ALPHA_DIRECT_AI_BOUNDS = (0.50, 0.95)
     ALPHA_DIRECT_FIXED_THETA = None
-    REDUCED7_ENERGY_SCALE_BOUNDS = None
+    # Reduced7 range-audit defaults. Keep these method-local so legacy/full BO
+    # methods retain their original search spaces.
+    REDUCED7_LATENCY_WEIGHT_BOUNDS = (0.1, 7.0)
+    REDUCED7_QUEUE_WEIGHT_BOUNDS = (0.0, 3.0)
+    REDUCED7_RISK_SCALE_BOUNDS = (0.0, 8.0)
+    REDUCED7_CLOUD_GATE_BOUNDS = (0.01, 0.95)
+    REDUCED7_ENERGY_SCALE_BOUNDS = (0.25, 2.0)
     # fixed5: BO/CBO share the same first 5 reduced7 probes inside the normal BO budget.
     # none/off: keep the older per-agent random cold start.
     REDUCED7_INITIAL_ANCHOR_MODE = "fixed5"
@@ -1034,7 +1040,15 @@ class ExperimentConfig:
     DEFAULT_CBO_PREDICTION_GUARD_START_ITER = 200
     DEFAULT_CBO_PREDICTION_GUARD_BIAS_WEIGHT = 1.0
     DEFAULT_CBO_PREDICTION_GUARD_MAE_WEIGHT = 0.5
-    DEFAULT_CBO_SIGMA_FLOOR = 1e-6
+    DEFAULT_CBO_SIGMA_CALIBRATION = "off"
+    DEFAULT_CBO_SIGMA_CALIBRATION_BUFFER_SIZE = 50
+    DEFAULT_CBO_SIGMA_CALIBRATION_MIN_SAMPLES = 10
+    DEFAULT_CBO_SIGMA_CALIBRATION_USE_IN_ACQ = "false"
+    DEFAULT_CBO_SIGMA_CALIBRATION_ETA = 0.25
+    DEFAULT_CBO_SIGMA_SCALE_DEFAULT = 4.0
+    DEFAULT_CBO_SIGMA_SCALE_MIN = 1.0
+    DEFAULT_CBO_SIGMA_SCALE_MAX = 6.0
+    DEFAULT_CBO_SIGMA_FLOOR = 0.03
     DEFAULT_CBO_RADIUS_RESET = 0.12
     DEFAULT_CBO_RADIUS_MIN_STUCK_ROUNDS = 10
     DEFAULT_CBO_REBOUND_WINDOW = 20
@@ -1105,6 +1119,10 @@ class ExperimentConfig:
     CONTROL_BETA_BOUNDS = (0.5, 8.0)
     CONTROL_OPPORTUNITY_RHO_BOUNDS = (0.0, 3.0)
     CONTROL_CLOUD_GATE_BOUNDS = (0.05, 0.95)
+    # Scheduler accepts the wider method-local Reduced7 range without changing
+    # the search bounds of legacy/full-dimensional BO methods.
+    SCHEDULER_RISK_SCALE_BOUNDS = (0.0, 8.0)
+    SCHEDULER_CLOUD_GATE_BOUNDS = (0.01, 0.95)
 
 CFG = ExperimentConfig()
 CFG.ARRIVAL_THRESHOLDS = infer_arrival_thresholds(CFG.LAMBDA_SCHEDULE)
@@ -1162,11 +1180,11 @@ def extract_scheduler_controls(theta_full):
     rho = get_theta_value(theta_full, "Opportunity_Rho", getattr(CFG, "OPPORTUNITY_RHO_DEFAULT", 1.0))
     rho = float(np.clip(rho, *CFG.CONTROL_OPPORTUNITY_RHO_BOUNDS))
     cloud_gate = get_theta_value(theta_full, "Cloud_Gate", getattr(CFG, "CLOUD_GATE_DEFAULT", 0.50))
-    cloud_gate = float(np.clip(cloud_gate, *CFG.CONTROL_CLOUD_GATE_BOUNDS))
+    cloud_gate = float(np.clip(cloud_gate, *getattr(CFG, "SCHEDULER_CLOUD_GATE_BOUNDS", CFG.CONTROL_CLOUD_GATE_BOUNDS)))
     queue_w = get_theta_value(theta_full, "W_Queue", getattr(CFG, "QUEUE_WEIGHT_DEFAULT", 1.0))
     queue_w = float(np.clip(queue_w, *CFG.CONTROL_QUEUE_BOUNDS))
     risk_scale = get_theta_value(theta_full, "W_Risk_Scale", getattr(CFG, "RISK_SCALE_DEFAULT", 1.0))
-    risk_scale = float(np.clip(risk_scale, *CFG.CONTROL_RISK_SCALE_BOUNDS))
+    risk_scale = float(np.clip(risk_scale, *getattr(CFG, "SCHEDULER_RISK_SCALE_BOUNDS", CFG.CONTROL_RISK_SCALE_BOUNDS)))
     return {
         "beta": beta if getattr(CFG, "USE_BO_BETA_CONTROL", True) else float(getattr(CFG, "BETA_INITIAL", 3.0)),
         "rho": rho if getattr(CFG, "USE_BO_OPPORTUNITY_RHO", True) else float(getattr(CFG, "OPPORTUNITY_RHO_DEFAULT", 1.0)),

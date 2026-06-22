@@ -210,7 +210,15 @@ def apply_cbo_stability_policy_override(groups):
         "cbo_surprise_window": _cbo_cli_option("--cbo-surprise-window", "CBO_SURPRISE_WINDOW", 10),
         "cbo_surprise_z_threshold": _cbo_cli_option("--cbo-surprise-z-threshold", "CBO_SURPRISE_Z_THRESHOLD", 2.0),
         "cbo_surprise_cost_gap_pct": _cbo_cli_option("--cbo-surprise-cost-gap-pct", "CBO_SURPRISE_COST_GAP_PCT", 0.03),
-        "cbo_sigma_floor": _cbo_cli_option("--cbo-sigma-floor", "CBO_SIGMA_FLOOR", 1e-6),
+        "cbo_sigma_calibration": _cbo_cli_option("--cbo-sigma-calibration", "CBO_SIGMA_CALIBRATION", "off"),
+        "cbo_sigma_calibration_buffer_size": _cbo_cli_option("--cbo-sigma-calibration-buffer-size", "CBO_SIGMA_CALIBRATION_BUFFER_SIZE", 50),
+        "cbo_sigma_calibration_min_samples": _cbo_cli_option("--cbo-sigma-calibration-min-samples", "CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10),
+        "cbo_sigma_calibration_use_in_acq": _cbo_cli_option("--cbo-sigma-calibration-use-in-acq", "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false"),
+        "cbo_sigma_calibration_eta": _cbo_cli_option("--cbo-sigma-calibration-eta", "CBO_SIGMA_CALIBRATION_ETA", 0.25),
+        "cbo_sigma_scale_default": _cbo_cli_option("--cbo-sigma-scale-default", "CBO_SIGMA_SCALE_DEFAULT", 4.0),
+        "cbo_sigma_scale_min": _cbo_cli_option("--cbo-sigma-scale-min", "CBO_SIGMA_SCALE_MIN", 1.0),
+        "cbo_sigma_scale_max": _cbo_cli_option("--cbo-sigma-scale-max", "CBO_SIGMA_SCALE_MAX", 6.0),
+        "cbo_sigma_floor": _cbo_cli_option("--cbo-sigma-floor", "CBO_SIGMA_FLOOR", 0.03),
         "cbo_radius_reset": _cbo_cli_option("--cbo-radius-reset", "CBO_RADIUS_RESET", 0.12),
         "cbo_radius_min_stuck_rounds": _cbo_cli_option("--cbo-radius-min-stuck-rounds", "CBO_RADIUS_MIN_STUCK_ROUNDS", 10),
         "cbo_rebound_window": _cbo_cli_option("--cbo-rebound-window", "CBO_REBOUND_WINDOW", 20),
@@ -358,6 +366,15 @@ def method_history_policy_map(groups):
             "surprise_window": group_cfg.get("cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10)),
             "surprise_z_threshold": group_cfg.get("cbo_surprise_z_threshold", _cfg_cbo_float("CBO_SURPRISE_Z_THRESHOLD", 2.0)),
             "surprise_cost_gap_pct": group_cfg.get("cbo_surprise_cost_gap_pct", _cfg_cbo_float("CBO_SURPRISE_COST_GAP_PCT", 0.03)),
+            "sigma_calibration": group_cfg.get("cbo_sigma_calibration", _cfg_cbo_str("CBO_SIGMA_CALIBRATION", "off")),
+            "sigma_calibration_buffer_size": group_cfg.get("cbo_sigma_calibration_buffer_size", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_BUFFER_SIZE", 50)),
+            "sigma_calibration_min_samples": group_cfg.get("cbo_sigma_calibration_min_samples", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10)),
+            "sigma_calibration_use_in_acq": group_cfg.get("cbo_sigma_calibration_use_in_acq", _cfg_cbo_str("CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")),
+            "sigma_calibration_eta": group_cfg.get("cbo_sigma_calibration_eta", _cfg_cbo_float("CBO_SIGMA_CALIBRATION_ETA", 0.25)),
+            "sigma_scale_default": group_cfg.get("cbo_sigma_scale_default", _cfg_cbo_float("CBO_SIGMA_SCALE_DEFAULT", 4.0)),
+            "sigma_scale_min": group_cfg.get("cbo_sigma_scale_min", _cfg_cbo_float("CBO_SIGMA_SCALE_MIN", 1.0)),
+            "sigma_scale_max": group_cfg.get("cbo_sigma_scale_max", _cfg_cbo_float("CBO_SIGMA_SCALE_MAX", 6.0)),
+            "sigma_floor": group_cfg.get("cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 0.03)),
             "radius_reset": group_cfg.get("cbo_radius_reset", _cfg_cbo_float("CBO_RADIUS_RESET", 0.12)),
             "radius_min_stuck_rounds": group_cfg.get("cbo_radius_min_stuck_rounds", _cfg_cbo_int("CBO_RADIUS_MIN_STUCK_ROUNDS", 10)),
             "rebound_window": group_cfg.get("cbo_rebound_window", _cfg_cbo_int("CBO_REBOUND_WINDOW", 20)),
@@ -833,6 +850,117 @@ def _cbo_force_exploration_active(agent):
         return False
 
 
+def _cbo_sigma_calibration_enabled(agent):
+    mode = str(getattr(agent, "cbo_sigma_calibration", _cfg_cbo_str("CBO_SIGMA_CALIBRATION", "off")) or "off").strip().lower()
+    return mode in {"on", "true", "1", "enabled"}
+
+
+def _cbo_sigma_calibration_state(agent):
+    default_scale = float(getattr(agent, "cbo_sigma_scale_default", _cfg_cbo_float("CBO_SIGMA_SCALE_DEFAULT", 4.0)))
+    scale_min = float(getattr(agent, "cbo_sigma_scale_min", _cfg_cbo_float("CBO_SIGMA_SCALE_MIN", 1.0)))
+    scale_max = float(getattr(agent, "cbo_sigma_scale_max", _cfg_cbo_float("CBO_SIGMA_SCALE_MAX", 6.0)))
+    if scale_min > scale_max:
+        scale_min, scale_max = scale_max, scale_min
+    buffer_size = max(1, int(getattr(agent, "cbo_sigma_calibration_buffer_size", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_BUFFER_SIZE", 50))))
+    min_samples = max(1, int(getattr(agent, "cbo_sigma_calibration_min_samples", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10))))
+    buffer = list(getattr(agent, "cbo_sigma_calibration_buffer", []) or [])[-buffer_size:]
+    pairs = []
+    for row in buffer:
+        try:
+            err = float(row.get("prediction_error", np.nan))
+            raw = float(row.get("raw_sigma", np.nan))
+            if np.isfinite(err) and np.isfinite(raw) and raw >= 0.0:
+                pairs.append((err, raw))
+        except Exception:
+            continue
+    estimated_scale = np.nan
+    history_weight = 0.0
+    scale = default_scale
+    if len(pairs) >= min_samples:
+        errors = np.asarray([p[0] for p in pairs], dtype=float)
+        raw_sigmas = np.asarray([p[1] for p in pairs], dtype=float)
+        rmse = float(np.sqrt(np.mean(np.square(errors))))
+        raw_rms = float(np.sqrt(np.mean(np.square(raw_sigmas))))
+        if np.isfinite(rmse) and np.isfinite(raw_rms) and raw_rms > 1e-12:
+            estimated_scale = rmse / raw_rms
+            history_weight = float(np.clip(len(pairs) / float(buffer_size), 0.0, 1.0))
+            scale = (1.0 - history_weight) * default_scale + history_weight * estimated_scale
+    scale = float(np.clip(scale, scale_min, scale_max))
+    return {
+        "sigma_scale": scale,
+        "sigma_scale_estimated": float(estimated_scale) if np.isfinite(estimated_scale) else np.nan,
+        "sigma_scale_history_weight": float(history_weight),
+        "calibration_buffer_size": int(len(pairs)),
+        "calibration_buffer_capacity": int(buffer_size),
+        "calibration_min_samples": int(min_samples),
+    }
+
+
+def _cbo_calibrate_sigma(agent, raw_sigma):
+    raw = np.maximum(np.asarray(raw_sigma, dtype=float), 0.0)
+    state = _cbo_sigma_calibration_state(agent)
+    enabled = _cbo_sigma_calibration_enabled(agent)
+    floor = max(0.0, float(getattr(agent, "cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 0.03))))
+    if enabled:
+        calibrated = np.maximum(raw * float(state["sigma_scale"]), floor)
+    else:
+        calibrated = raw
+        state["sigma_scale"] = 1.0
+    state.update({
+        "sigma_calibration_enabled": int(enabled),
+        "sigma_floor": float(floor),
+    })
+    try:
+        agent.cbo_last_sigma_calibration_info = dict(state)
+    except Exception:
+        pass
+    return calibrated, state
+
+
+def _cbo_sigma_for_acquisition(agent, raw_sigma, sigma_calibrated):
+    raw = np.maximum(np.asarray(raw_sigma, dtype=float), 0.0)
+    calibrated = np.maximum(np.asarray(sigma_calibrated, dtype=float), 0.0)
+    mode = str(getattr(agent, "cbo_sigma_calibration_use_in_acq", _cfg_cbo_str("CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")) or "false").strip().lower()
+    if mode in {"1", "on", "yes", "full"}:
+        mode = "true"
+    elif mode in {"0", "off", "no", "raw"}:
+        mode = "false"
+    if mode not in {"false", "soft", "true"}:
+        mode = "false"
+    eta = float(np.clip(getattr(agent, "cbo_sigma_calibration_eta", _cfg_cbo_float("CBO_SIGMA_CALIBRATION_ETA", 0.25)), 0.0, 1.0))
+    if mode == "true":
+        sigma_acq = calibrated
+        formula = "sigma_acq=sigma_calibrated"
+    elif mode == "soft":
+        sigma_acq = raw + eta * (calibrated - raw)
+        formula = f"sigma_acq=raw_sigma+{eta:.6g}*(sigma_calibrated-raw_sigma)"
+    else:
+        sigma_acq = raw
+        formula = "sigma_acq=raw_sigma"
+    return sigma_acq, {
+        "sigma_calibration_use_in_acq": mode,
+        "sigma_calibration_eta": eta,
+        "sigma_acq_formula": formula,
+    }
+
+
+def _cbo_set_pending_sigma_calibration(agent, theta, predicted_cost, raw_sigma, sigma_scale, sigma_calibrated, sigma_acq):
+    if agent is None or not _cbo_sigma_calibration_enabled(agent):
+        return
+    try:
+        agent._cbo_pending_sigma_calibration = {
+            "theta": list(theta) if theta is not None else None,
+            "predicted_cost": float(predicted_cost),
+            "raw_sigma": float(raw_sigma),
+            "sigma_scale": float(sigma_scale),
+            "sigma_calibrated": float(sigma_calibrated),
+            "sigma_acq": float(sigma_acq),
+            "calibration_buffer_size_before": int(len(getattr(agent, "cbo_sigma_calibration_buffer", []) or [])),
+        }
+    except Exception:
+        agent._cbo_pending_sigma_calibration = None
+
+
 def _cbo_select_index_from_scores(agent, mu, sigma, score, default_reason="greedy_posterior_mean"):
     """Select a candidate index from posterior scores.
 
@@ -846,9 +974,11 @@ def _cbo_select_index_from_scores(agent, mu, sigma, score, default_reason="greed
     if n <= 0:
         return 0, "empty_candidate_fallback"
     beta_mode = str(getattr(agent, "cbo_acq_beta_mode", _cfg_cbo_str("CBO_ACQ_BETA_MODE", "fixed")) or "fixed").strip().lower()
-    # Backward compatibility: fixed beta keeps the old SAFEBO=greedy_mean
-    # posterior-mean choice. Adaptive beta modes use the score directly.
-    if str(default_reason) == "greedy_posterior_mean" and beta_mode == "fixed":
+    # false is diagnostic-only: preserve the legacy fixed-beta greedy-mean
+    # deployment regardless of whether the calibration buffer is enabled.
+    _, sigma_acq_info = _cbo_sigma_for_acquisition(agent, [0.0], [0.0])
+    sigma_acq_mode = str(sigma_acq_info.get("sigma_calibration_use_in_acq", "false"))
+    if str(default_reason) == "greedy_posterior_mean" and beta_mode == "fixed" and sigma_acq_mode == "false":
         greedy_idx = _cbo_numpy_argmax_safe(mu)
     else:
         greedy_idx = _cbo_numpy_argmax_safe(score)
@@ -1198,10 +1328,92 @@ def _cbo_apply_prediction_guard_active(agent, theta, info, robust_info=None):
     return theta, info, diag
 
 
+def _cbo_finalize_sigma_calibration_feedback(agent, actual_cost, debug):
+    """Pair the deployed candidate posterior with its observed window cost."""
+    pending = getattr(agent, "_cbo_pending_sigma_calibration", None)
+    agent._cbo_pending_sigma_calibration = None
+    floor = max(0.0, float(getattr(agent, "cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 0.03))))
+
+    predicted_cost = np.nan
+    raw_sigma = np.nan
+    sigma_scale = np.nan
+    sigma_calibrated = np.nan
+    sigma_acq = np.nan
+    if isinstance(pending, dict):
+        predicted_cost = float(pending.get("predicted_cost", np.nan))
+        raw_sigma = float(pending.get("raw_sigma", np.nan))
+        sigma_scale = float(pending.get("sigma_scale", np.nan))
+        sigma_calibrated = float(pending.get("sigma_calibrated", np.nan))
+        sigma_acq = float(pending.get("sigma_acq", np.nan))
+    else:
+        try:
+            predicted_cost = float(debug.get("predicted_cost", -float(debug.get("selected_candidate_mu", debug.get("posterior_mu")))))
+        except Exception:
+            predicted_cost = np.nan
+        try:
+            raw_sigma = float(debug.get("raw_sigma", debug.get("selected_candidate_sigma", debug.get("posterior_sigma"))))
+        except Exception:
+            raw_sigma = np.nan
+        sigma_scale = float(debug.get("sigma_scale", 1.0 if not _cbo_sigma_calibration_enabled(agent) else np.nan))
+        sigma_calibrated = float(debug.get("sigma_calibrated", np.nan))
+        sigma_acq = float(debug.get("sigma_acq", np.nan))
+
+    if not np.isfinite(sigma_scale):
+        sigma_scale = float(_cbo_sigma_calibration_state(agent)["sigma_scale"])
+    if not np.isfinite(sigma_calibrated) and np.isfinite(raw_sigma):
+        sigma_calibrated = max(raw_sigma * sigma_scale, floor) if _cbo_sigma_calibration_enabled(agent) else raw_sigma
+    if not np.isfinite(sigma_acq) and np.isfinite(raw_sigma) and np.isfinite(sigma_calibrated):
+        sigma_acq_arr, _ = _cbo_sigma_for_acquisition(agent, [raw_sigma], [sigma_calibrated])
+        sigma_acq = float(sigma_acq_arr[0])
+    _, sigma_acq_diag = _cbo_sigma_for_acquisition(
+        agent,
+        [raw_sigma if np.isfinite(raw_sigma) else 0.0],
+        [sigma_calibrated if np.isfinite(sigma_calibrated) else 0.0],
+    )
+
+    prediction_error = float(actual_cost) - predicted_cost if np.isfinite(predicted_cost) else np.nan
+    raw_surprise = prediction_error / max(abs(raw_sigma), 1e-12) if np.isfinite(prediction_error) and np.isfinite(raw_sigma) else np.nan
+    calibrated_surprise = prediction_error / max(abs(sigma_calibrated), floor, 1e-12) if np.isfinite(prediction_error) and np.isfinite(sigma_calibrated) else np.nan
+
+    if _cbo_sigma_calibration_enabled(agent) and np.isfinite(prediction_error) and np.isfinite(raw_sigma):
+        capacity = max(1, int(getattr(agent, "cbo_sigma_calibration_buffer_size", 50)))
+        buffer = list(getattr(agent, "cbo_sigma_calibration_buffer", []) or [])
+        buffer.append({"prediction_error": float(prediction_error), "raw_sigma": float(raw_sigma)})
+        agent.cbo_sigma_calibration_buffer = buffer[-capacity:]
+
+    result = {
+        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
+        "actual_cost": float(actual_cost),
+        "prediction_error": float(prediction_error) if np.isfinite(prediction_error) else np.nan,
+        "raw_sigma": float(raw_sigma) if np.isfinite(raw_sigma) else np.nan,
+        "sigma_scale": float(sigma_scale),
+        "sigma_calibrated": float(sigma_calibrated) if np.isfinite(sigma_calibrated) else np.nan,
+        "sigma_acq": float(sigma_acq) if np.isfinite(sigma_acq) else np.nan,
+        **sigma_acq_diag,
+        "raw_surprise": float(raw_surprise) if np.isfinite(raw_surprise) else np.nan,
+        "calibrated_surprise": float(calibrated_surprise) if np.isfinite(calibrated_surprise) else np.nan,
+        "surprise": float(calibrated_surprise) if np.isfinite(calibrated_surprise) else np.nan,
+        "calibration_buffer_size": int(len(getattr(agent, "cbo_sigma_calibration_buffer", []) or [])),
+        "prediction_error_valid": int(np.isfinite(prediction_error)),
+        "prediction_error_skipped_reason": None,
+    }
+
+    hist = list(getattr(agent, "cbo_surprise_history", []) or [])
+    hist.append({**result, "radius": float(getattr(agent, "trust_radius", np.nan))})
+    max_hist = max(
+        20,
+        int(getattr(agent, "cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10))) * 5,
+        int(_cbo_prediction_guard_param("window", 50, int)) * 5,
+    )
+    agent.cbo_surprise_history = hist[-max_hist:]
+    return result
+
+
 def _cbo_update_prediction_error_diagnostics(agent, actual_cost):
     """Record selected-candidate prediction error for normal CBO modes."""
     debug = dict(getattr(agent, "last_debug_info", {}) or {})
     if _cbo_prediction_error_should_skip(debug):
+        agent._cbo_pending_sigma_calibration = None
         active_diag = _cbo_prediction_guard_active_diag_from_debug(debug)
         stats = _cbo_prediction_guard_stats(agent)
         debug.update(stats)
@@ -1217,44 +1429,7 @@ def _cbo_update_prediction_error_diagnostics(agent, actual_cost):
         agent.last_debug_info = debug
         return debug
 
-    sigma_floor = max(1e-12, float(getattr(agent, "cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 1e-6))))
-    mu = debug.get("selected_candidate_mu", debug.get("posterior_mu"))
-    sigma = debug.get("selected_candidate_sigma", debug.get("posterior_sigma"))
-    predicted_cost = np.nan
-    surprise = np.nan
-    raw_error = np.nan
-    try:
-        if mu is not None and np.isfinite(float(mu)):
-            predicted_cost = -float(mu)
-            raw_error = float(actual_cost) - predicted_cost
-            sig = sigma_floor if sigma is None or not np.isfinite(float(sigma)) else max(float(sigma), sigma_floor)
-            surprise = raw_error / sig
-    except Exception:
-        pass
-
-    hist = list(getattr(agent, "cbo_surprise_history", []) or [])
-    hist.append({
-        "actual_cost": float(actual_cost),
-        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
-        "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
-        "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
-        "radius": float(getattr(agent, "trust_radius", np.nan)),
-    })
-    max_hist = max(
-        20,
-        int(getattr(agent, "cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10))) * 5,
-        int(_cbo_prediction_guard_param("window", 50, int)) * 5,
-    )
-    agent.cbo_surprise_history = hist[-max_hist:]
-
-    debug.update({
-        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
-        "actual_cost": float(actual_cost),
-        "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
-        "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
-        "prediction_error_valid": int(np.isfinite(raw_error)),
-        "prediction_error_skipped_reason": None,
-    })
+    debug.update(_cbo_finalize_sigma_calibration_feedback(agent, actual_cost, debug))
     debug.update(_cbo_prediction_guard_stats(agent))
     agent.last_debug_info = debug
     return debug
@@ -1269,6 +1444,7 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
     """
     debug = dict(getattr(agent, "last_debug_info", {}) or {})
     if _cbo_prediction_error_should_skip(debug):
+        agent._cbo_pending_sigma_calibration = None
         active_diag = _cbo_prediction_guard_active_diag_from_debug(debug)
         stats = _cbo_prediction_guard_stats(agent)
         debug.update(stats)
@@ -1285,35 +1461,11 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
         return debug
     tr_mode = str(getattr(agent, "cbo_tr_mode", _cfg_cbo_str("CBO_TR_MODE", "off")) or "off").lower()
     select_mode = str(getattr(agent, "cbo_select_mode", _cfg_cbo_str("CBO_SELECT_MODE", "greedy")) or "greedy").lower()
-    sigma_floor = max(1e-12, float(getattr(agent, "cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 1e-6))))
-    mu = debug.get("selected_candidate_mu", debug.get("posterior_mu"))
-    sigma = debug.get("selected_candidate_sigma", debug.get("posterior_sigma"))
-    predicted_cost = np.nan
-    surprise = np.nan
-    raw_error = np.nan
-    try:
-        if mu is not None and np.isfinite(float(mu)):
-            predicted_cost = -float(mu)
-            raw_error = float(actual_cost) - predicted_cost
-            sig = sigma_floor if sigma is None or not np.isfinite(float(sigma)) else max(float(sigma), sigma_floor)
-            surprise = raw_error / sig
-    except Exception:
-        pass
-
-    hist = list(getattr(agent, "cbo_surprise_history", []))
-    hist.append({
-        "actual_cost": float(actual_cost),
-        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
-        "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
-        "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
-        "radius": float(getattr(agent, "trust_radius", np.nan)),
-    })
-    max_hist = max(
-        20,
-        int(getattr(agent, "cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10))) * 5,
-        int(_cbo_prediction_guard_param("window", 50, int)) * 5,
-    )
-    agent.cbo_surprise_history = hist[-max_hist:]
+    feedback = _cbo_finalize_sigma_calibration_feedback(agent, actual_cost, debug)
+    debug.update(feedback)
+    predicted_cost = feedback["predicted_cost"]
+    raw_error = feedback["prediction_error"]
+    surprise = feedback["calibrated_surprise"]
 
     # radius-min stuck counter
     r = float(getattr(agent, "trust_radius", np.nan))
@@ -1362,12 +1514,6 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
         "cbo_select_temperature": float(getattr(agent, "cbo_select_temperature", _cfg_cbo_float("CBO_SELECT_TEMPERATURE", 0.20))),
         "cbo_epsilon": float(getattr(agent, "cbo_epsilon", _cfg_cbo_float("CBO_EPSILON", 0.10))),
         "cbo_acq_beta": float(getattr(agent, "cbo_acq_beta", _cfg_cbo_float("CBO_ACQ_BETA", 3.0))),
-        "predicted_cost": float(predicted_cost) if np.isfinite(predicted_cost) else np.nan,
-        "actual_cost": float(actual_cost),
-        "prediction_error": float(raw_error) if np.isfinite(raw_error) else np.nan,
-        "surprise": float(surprise) if np.isfinite(surprise) else np.nan,
-        "prediction_error_valid": int(np.isfinite(raw_error)),
-        "prediction_error_skipped_reason": None,
         "cost_gap_pct": float(cost_gap_pct),
         "residual_trigger": int(residual_trigger),
         "condition_trigger": int(condition_trigger),
@@ -1420,18 +1566,25 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
             var_std = posterior.variance.detach().view(-1)
             mu = mu_std * y_std + y_mean
             sigma = torch.sqrt(torch.clamp(var_std * (y_std ** 2), min=0.0))
+            mu_np = mu.detach().cpu().numpy()
+            raw_sigma_np = sigma.detach().cpu().numpy()
+            sigma_calibrated_np, calibration_info = _cbo_calibrate_sigma(agent, raw_sigma_np)
+            sigma_acq_np, sigma_acq_info = _cbo_sigma_for_acquisition(agent, raw_sigma_np, sigma_calibrated_np)
             beta_info = _cbo_beta_eff_info(agent)
-            score = mu + float(beta_info.get("beta_eff", getattr(agent, "cbo_acq_beta", getattr(agent, "beta_init", 3.0)))) * sigma
-            score_np, service_penalty, guard_info = _cbo_service_guard_apply(agent, score.detach().cpu().numpy())
+            score_np = mu_np + float(beta_info.get("beta_eff", getattr(agent, "cbo_acq_beta", getattr(agent, "beta_init", 3.0)))) * sigma_acq_np
+            score_np, service_penalty, guard_info = _cbo_service_guard_apply(agent, score_np)
             beta_info.update(guard_info)
+            beta_info.update(calibration_info)
+            beta_info.update(sigma_acq_info)
+            beta_info["actual_score_formula"] = "mu + beta_eff * sigma_acq"
             try:
                 agent.cbo_last_beta_info = dict(beta_info)
             except Exception:
                 pass
             best_idx, select_reason = _cbo_select_index_from_scores(
                 agent,
-                mu.detach().cpu().numpy(),
-                sigma.detach().cpu().numpy(),
+                mu_np,
+                sigma_acq_np,
                 score_np,
                 default_reason="greedy_posterior_mean",
             )
@@ -1460,12 +1613,20 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
             robust_theta = None
         cand_rows, cand_summary = _cbo_candidate_rows(
             agent, candidates, sources,
-            mu.detach().cpu().numpy(), sigma.detach().cpu().numpy(), score_np,
+            mu_np, sigma_acq_np, score_np,
             best_idx, selected_reason=str(select_reason),
             deploy_policy="greedy_mean", deploy_source=str(select_reason),
             anchor=(getattr(agent, "cbo_last_actual_anchor_debug", {}) or {}).get("actual_tr_anchor_theta", getattr(agent, "prev_best", None)),
             robust_theta=robust_theta, recent_best=recent_best,
             beta_eff=beta_info.get("beta_eff"), service_penalty=service_penalty,
+        )
+        predicted_cost = -float(mu_np[best_idx])
+        raw_sigma_selected = float(raw_sigma_np[best_idx])
+        sigma_calibrated_selected = float(sigma_calibrated_np[best_idx])
+        sigma_acq_selected = float(sigma_acq_np[best_idx])
+        _cbo_set_pending_sigma_calibration(
+            agent, theta, predicted_cost, raw_sigma_selected,
+            calibration_info.get("sigma_scale", 1.0), sigma_calibrated_selected, sigma_acq_selected,
         )
         debug = dict(getattr(agent, "last_debug_info", {}) or {})
         debug.update(cand_summary)
@@ -1473,7 +1634,16 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
         debug.update({
             "selected_candidate_source": str(sources[best_idx] if 0 <= best_idx < len(sources) else "posterior_mean_candidate"),
             "selected_candidate_mu": float(mu[best_idx].item()),
-            "selected_candidate_sigma": float(sigma[best_idx].item()),
+            "selected_candidate_sigma": sigma_acq_selected,
+            "predicted_cost": predicted_cost,
+            "raw_sigma": raw_sigma_selected,
+            "sigma_scale": float(calibration_info.get("sigma_scale", 1.0)),
+            "sigma_calibrated": sigma_calibrated_selected,
+            "sigma_acq": sigma_acq_selected,
+            "sigma_calibration_use_in_acq": str(sigma_acq_info.get("sigma_calibration_use_in_acq", "false")),
+            "sigma_calibration_eta": float(sigma_acq_info.get("sigma_calibration_eta", 0.25)),
+            "sigma_acq_formula": str(sigma_acq_info.get("sigma_acq_formula", "sigma_acq=raw_sigma")),
+            "calibration_buffer_size": int(calibration_info.get("calibration_buffer_size", 0)),
             "selected_candidate_acq": float(score_np[best_idx]),
             "selected_candidate_score": float(score_np[best_idx]),
             "selected_candidate_beta_eff": float(beta_info.get("beta_eff", np.nan)),
@@ -1491,7 +1661,16 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
             **cand_summary,
             "selected_candidate_source": str(sources[best_idx] if 0 <= best_idx < len(sources) else "posterior_mean_candidate"),
             "selected_candidate_mu": float(mu[best_idx].item()),
-            "selected_candidate_sigma": float(sigma[best_idx].item()),
+            "selected_candidate_sigma": sigma_acq_selected,
+            "predicted_cost": predicted_cost,
+            "raw_sigma": raw_sigma_selected,
+            "sigma_scale": float(calibration_info.get("sigma_scale", 1.0)),
+            "sigma_calibrated": sigma_calibrated_selected,
+            "sigma_acq": sigma_acq_selected,
+            "sigma_calibration_use_in_acq": str(sigma_acq_info.get("sigma_calibration_use_in_acq", "false")),
+            "sigma_calibration_eta": float(sigma_acq_info.get("sigma_calibration_eta", 0.25)),
+            "sigma_acq_formula": str(sigma_acq_info.get("sigma_acq_formula", "sigma_acq=raw_sigma")),
+            "calibration_buffer_size": int(calibration_info.get("calibration_buffer_size", 0)),
             "selected_candidate_acq": float(score_np[best_idx]),
             "selected_candidate_score": float(score_np[best_idx]),
             "selected_candidate_beta_eff": float(beta_info.get("beta_eff", np.nan)),
@@ -1680,7 +1859,12 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "anchor_fallback_used", "anchor_fallback_reason", "anchor_theta_distance_to_prev",
             "anchor_theta_distance_to_robust_elite", "anchor_theta_distance_to_context_best",
             "anchor_theta_distance_to_recent_best", "runtime_anchor_override_reason",
-            "predicted_cost", "actual_cost", "prediction_error", "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
+            "predicted_cost", "actual_cost", "prediction_error", "raw_sigma", "sigma_scale",
+            "sigma_calibrated", "sigma_acq", "sigma_calibration_use_in_acq",
+            "sigma_calibration_eta", "sigma_acq_formula",
+            "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
+            "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
+            "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
             "prediction_guard_mode", "prediction_guard_enabled", "prediction_guard_history_count",
             "prediction_guard_recent_bias", "prediction_guard_recent_mae", "prediction_guard_underestimate_rate",
             "prediction_guard_surprise_abs_mean", "prediction_guard_should_trigger", "prediction_guard_reason",
@@ -3727,7 +3911,17 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_surprise_window = int(group_cfg.get("cbo_surprise_window", _cfg_cbo_int("CBO_SURPRISE_WINDOW", 10)))
     agent.cbo_surprise_z_threshold = float(group_cfg.get("cbo_surprise_z_threshold", _cfg_cbo_float("CBO_SURPRISE_Z_THRESHOLD", 2.0)))
     agent.cbo_surprise_cost_gap_pct = float(group_cfg.get("cbo_surprise_cost_gap_pct", _cfg_cbo_float("CBO_SURPRISE_COST_GAP_PCT", 0.03)))
-    agent.cbo_sigma_floor = float(group_cfg.get("cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 1e-6)))
+    agent.cbo_sigma_calibration = str(group_cfg.get("cbo_sigma_calibration", _cfg_cbo_str("CBO_SIGMA_CALIBRATION", "off")) if agent.is_cbo_stability_enabled else "off").strip().lower()
+    agent.cbo_sigma_calibration_buffer_size = max(1, int(group_cfg.get("cbo_sigma_calibration_buffer_size", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_BUFFER_SIZE", 50))))
+    agent.cbo_sigma_calibration_min_samples = max(1, int(group_cfg.get("cbo_sigma_calibration_min_samples", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10))))
+    agent.cbo_sigma_calibration_use_in_acq = str(group_cfg.get("cbo_sigma_calibration_use_in_acq", _cfg_cbo_str("CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false"))).strip().lower()
+    agent.cbo_sigma_calibration_eta = float(np.clip(group_cfg.get("cbo_sigma_calibration_eta", _cfg_cbo_float("CBO_SIGMA_CALIBRATION_ETA", 0.25)), 0.0, 1.0))
+    agent.cbo_sigma_scale_default = float(group_cfg.get("cbo_sigma_scale_default", _cfg_cbo_float("CBO_SIGMA_SCALE_DEFAULT", 4.0)))
+    agent.cbo_sigma_scale_min = float(group_cfg.get("cbo_sigma_scale_min", _cfg_cbo_float("CBO_SIGMA_SCALE_MIN", 1.0)))
+    agent.cbo_sigma_scale_max = float(group_cfg.get("cbo_sigma_scale_max", _cfg_cbo_float("CBO_SIGMA_SCALE_MAX", 6.0)))
+    agent.cbo_sigma_floor = float(group_cfg.get("cbo_sigma_floor", _cfg_cbo_float("CBO_SIGMA_FLOOR", 0.03)))
+    agent.cbo_sigma_calibration_buffer = list(getattr(agent, "cbo_sigma_calibration_buffer", []) or [])[-agent.cbo_sigma_calibration_buffer_size:]
+    agent._cbo_pending_sigma_calibration = None
     agent.cbo_history_denoise_mode = str(group_cfg.get("cbo_history_denoise_mode", _cfg_cbo_str("CBO_HISTORY_DENOISE_MODE", "off"))).strip().lower()
     agent.cbo_history_denoise_k = int(group_cfg.get("cbo_history_denoise_k", _cfg_cbo_int("CBO_HISTORY_DENOISE_K", 7)))
     agent.cbo_history_denoise_radius = float(group_cfg.get("cbo_history_denoise_radius", _cfg_cbo_float("CBO_HISTORY_DENOISE_RADIUS", 0.12)))
@@ -6752,7 +6946,11 @@ def run_scenario_group(seed, group_key, group_cfg):
                 "tr_worse_pct", "tr_update_signal", "tr_update_patience_count",
                 "cbo_tr_update_reason", "cbo_tr_radius_before_update", "cbo_tr_radius_after_update",
                 "cbo_tr_success_count", "cbo_tr_failure_count", "predicted_cost", "actual_cost",
-                "prediction_error", "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct", "residual_trigger",
+                "prediction_error", "raw_sigma", "sigma_scale", "sigma_calibrated", "sigma_acq",
+                "sigma_calibration_use_in_acq", "sigma_calibration_eta", "sigma_acq_formula",
+                "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
+                "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
+                "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct", "residual_trigger",
                 "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
                 "runtime_anchor_override",
             ]:
@@ -6772,6 +6970,8 @@ def run_scenario_group(seed, group_key, group_cfg):
                 safe_info["anchor_override_reason"] = f"runtime_anchor_override={override_mode}"
         if fac.agent is not None and _is_cbo_method_key(group_key, group_cfg):
             safe_info = _cbo_update_good_region_memory(fac.agent, i + 1, theta_control, float(metrics.get("cost", np.nan)), safe_info)
+            _, sigma_acq_diag = _cbo_sigma_for_acquisition(fac.agent, [0.0], [0.0])
+            safe_info.update(sigma_acq_diag)
         for diag_key in [
             "selected_candidate_source", "selected_candidate_mu", "selected_candidate_sigma",
             "selected_candidate_acq", "selected_candidate_score", "selected_candidate_beta_eff",
@@ -6811,7 +7011,12 @@ def run_scenario_group(seed, group_key, group_cfg):
             "tr_update_mode", "tr_baseline_mean", "tr_current_mean", "tr_improve_pct",
             "tr_worse_pct", "tr_update_signal", "tr_update_patience_count",
             "cbo_tr_radius_before_update",
-            "predicted_cost", "actual_cost", "prediction_error", "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
+            "predicted_cost", "actual_cost", "prediction_error", "raw_sigma", "sigma_scale",
+            "sigma_calibrated", "sigma_acq", "sigma_calibration_use_in_acq",
+            "sigma_calibration_eta", "sigma_acq_formula",
+            "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
+            "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
+            "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
             "residual_trigger", "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
             "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
             "cbo_warm_start_enabled", "cbo_warm_start_mode", "cbo_warm_start_loaded_rows",
@@ -6849,6 +7054,14 @@ def run_scenario_group(seed, group_key, group_cfg):
             if k == "candidate_diagnostic_rows":
                 continue
             fac.perf_log.setdefault(k, []).append(v)
+        if fac.agent is not None and _is_cbo_method_key(group_key, group_cfg):
+            _, sigma_acq_diag = _cbo_sigma_for_acquisition(fac.agent, [0.0], [0.0])
+            for key, value in sigma_acq_diag.items():
+                values = fac.perf_log.setdefault(key, [])
+                if values:
+                    values[-1] = value
+                else:
+                    values.append(value)
         fac.perf_log.setdefault("theta_control_deployed", []).append(list(theta_control))
         fac.perf_log.setdefault("theta_full_deployed", []).append(list(theta_full))
         fac.perf_log.setdefault("theta_full_feature_names", []).append(list(getattr(CFG, "FEATURE_NAMES", [])))

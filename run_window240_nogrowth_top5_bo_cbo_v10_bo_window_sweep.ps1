@@ -20,7 +20,7 @@ $env:NUMEXPR_NUM_THREADS = '1'
 $env:MPLBACKEND = 'Agg'
 
 $ROOT = Join-Path 'D:\CBOv2' $ProjectSubPath
-$OUT = "D:\CBOv2\results\window240_nogrowth_top5_static_bo_cbo_v10_bo_window_sweep_s$Seed"
+$OUT = "D:\CBOv2\results\window240_nogrowth_top5_static_bo_cbo_v10_bo_window_sweep_sigma_calibrated_s$Seed"
 $KEY = 'reduced7_bo_greedy,reduced7_cbo_lite_pressure_taskmix_counts'
 
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
@@ -75,7 +75,11 @@ foreach ($boWindow in $BoWindows) {
             '--session-duration', '120000',
             '--fixed-rng',
             '--fixed-seed', "$Seed",
-            '--reduced7-energy-scale-bounds', '0.5,3.0',
+            '--reduced7-latency-weight-bounds', '0.1,7.0',
+            '--reduced7-queue-weight-bounds', '0.0,3.0',
+            '--reduced7-risk-scale-bounds', '0.0,8.0',
+            '--reduced7-cloud-gate-bounds', '0.01,0.95',
+            '--reduced7-energy-scale-bounds', '0.25,2.0',
             '--feedback-score', 'task_effective_backlog_violation',
             '--bo-history-mode', 'recent',
             '--bo-recent-window', "$boWindow",
@@ -84,6 +88,15 @@ foreach ($boWindow in $BoWindows) {
             '--cbo-shared-reference-policy', 'cbo_first',
             '--cbo-shared-reference-warmup-rounds', '5',
             '--cbo-reference-source-method-key', 'reduced7_cbo_lite_pressure_taskmix_counts',
+            '--cbo-sigma-calibration', 'on',
+            '--cbo-sigma-calibration-buffer-size', '50',
+            '--cbo-sigma-calibration-min-samples', '10',
+            '--cbo-sigma-calibration-use-in-acq', 'false',
+            '--cbo-sigma-calibration-eta', '0.25',
+            '--cbo-sigma-scale-default', '4.0',
+            '--cbo-sigma-scale-min', '1.0',
+            '--cbo-sigma-scale-max', '6.0',
+            '--cbo-sigma-floor', '0.03',
             '--cbo-backlog-growth-penalty-weight', '0',
             '--scheduler-score-norm-mode', 'candidate_minmax_deadline',
             '--task-adaptation',

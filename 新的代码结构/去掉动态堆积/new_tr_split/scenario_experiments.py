@@ -259,6 +259,15 @@ def build_scenario_method_groups():
             "cbo_external_gate_threshold": 0.35,
             "cbo_external_gate_topk": 240,
             "cbo_external_gate_min_samples": 12,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_buffer_size": 50,
+            "cbo_sigma_calibration_min_samples": 10,
+            "cbo_sigma_calibration_use_in_acq": "false",
+            "cbo_sigma_calibration_eta": 0.25,
+            "cbo_sigma_scale_default": 4.0,
+            "cbo_sigma_scale_min": 1.0,
+            "cbo_sigma_scale_max": 6.0,
+            "cbo_sigma_floor": 0.03,
             "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure6"),
         },
         "reduced9_fixed_mid": {
@@ -710,28 +719,50 @@ REDUCED7_FEATURE_NAMES = [
 ]
 
 
-def get_reduced7_energy_scale_bounds():
-    pair = getattr(CFG, "REDUCED7_ENERGY_SCALE_BOUNDS", None)
+def _get_reduced7_bounds_pair(attr_name, fallback):
+    pair = getattr(CFG, attr_name, None)
     if pair is None:
-        pair = CFG.CONTROL_WEIGHT_BOUNDS
+        pair = fallback
     try:
         lo = float(pair[0])
         hi = float(pair[1])
     except Exception:
-        lo, hi = float(CFG.CONTROL_WEIGHT_BOUNDS[0]), float(CFG.CONTROL_WEIGHT_BOUNDS[1])
+        lo, hi = float(fallback[0]), float(fallback[1])
     if lo > hi:
         lo, hi = hi, lo
     return (lo, hi)
 
 
+def get_reduced7_latency_weight_bounds():
+    return _get_reduced7_bounds_pair("REDUCED7_LATENCY_WEIGHT_BOUNDS", CFG.CONTROL_WEIGHT_BOUNDS)
+
+
+def get_reduced7_queue_weight_bounds():
+    return _get_reduced7_bounds_pair("REDUCED7_QUEUE_WEIGHT_BOUNDS", CFG.CONTROL_QUEUE_BOUNDS)
+
+
+def get_reduced7_risk_scale_bounds():
+    return _get_reduced7_bounds_pair("REDUCED7_RISK_SCALE_BOUNDS", CFG.CONTROL_RISK_SCALE_BOUNDS)
+
+
+def get_reduced7_cloud_gate_bounds():
+    return _get_reduced7_bounds_pair("REDUCED7_CLOUD_GATE_BOUNDS", REDUCED6_CLOUD_GATE_BOUNDS)
+
+
+def get_reduced7_energy_scale_bounds():
+    return _get_reduced7_bounds_pair("REDUCED7_ENERGY_SCALE_BOUNDS", CFG.CONTROL_WEIGHT_BOUNDS)
+
+
 def get_reduced7_control_bounds():
+    latency_lo, latency_hi = get_reduced7_latency_weight_bounds()
+    queue_lo, queue_hi = get_reduced7_queue_weight_bounds()
+    risk_lo, risk_hi = get_reduced7_risk_scale_bounds()
+    cloud_lo, cloud_hi = get_reduced7_cloud_gate_bounds()
     energy_lo, energy_hi = get_reduced7_energy_scale_bounds()
     return [
-        [float(CFG.CONTROL_WEIGHT_BOUNDS[0]), float(CFG.CONTROL_WEIGHT_BOUNDS[0]), float(CFG.CONTROL_WEIGHT_BOUNDS[0]),
-         float(CFG.CONTROL_QUEUE_BOUNDS[0]), float(CFG.CONTROL_RISK_SCALE_BOUNDS[0]), float(REDUCED6_CLOUD_GATE_BOUNDS[0]),
+        [latency_lo, latency_lo, latency_lo, queue_lo, risk_lo, cloud_lo,
          float(energy_lo)],
-        [float(CFG.CONTROL_WEIGHT_BOUNDS[1]), float(CFG.CONTROL_WEIGHT_BOUNDS[1]), float(CFG.CONTROL_WEIGHT_BOUNDS[1]),
-         float(CFG.CONTROL_QUEUE_BOUNDS[1]), float(CFG.CONTROL_RISK_SCALE_BOUNDS[1]), float(REDUCED6_CLOUD_GATE_BOUNDS[1]),
+        [latency_hi, latency_hi, latency_hi, queue_hi, risk_hi, cloud_hi,
          float(energy_hi)],
     ]
 
@@ -789,9 +820,13 @@ def reduced7_to_full_theta(theta7):
     rt_lat = float(t[0])
     batch_lat = float(t[1])
     ai_lat = float(t[2])
-    queue_w = float(np.clip(float(t[3]), *CFG.CONTROL_QUEUE_BOUNDS))
-    risk_scale = float(np.clip(float(t[4]), *CFG.CONTROL_RISK_SCALE_BOUNDS))
-    cloud_gate = float(np.clip(float(t[5]), float(REDUCED6_CLOUD_GATE_BOUNDS[0]), float(REDUCED6_CLOUD_GATE_BOUNDS[1])))
+    latency_lo, latency_hi = get_reduced7_latency_weight_bounds()
+    rt_lat = float(np.clip(rt_lat, latency_lo, latency_hi))
+    batch_lat = float(np.clip(batch_lat, latency_lo, latency_hi))
+    ai_lat = float(np.clip(ai_lat, latency_lo, latency_hi))
+    queue_w = float(np.clip(float(t[3]), *get_reduced7_queue_weight_bounds()))
+    risk_scale = float(np.clip(float(t[4]), *get_reduced7_risk_scale_bounds()))
+    cloud_gate = float(np.clip(float(t[5]), *get_reduced7_cloud_gate_bounds()))
     energy_scale = float(np.clip(float(t[6]), *get_reduced7_energy_scale_bounds()))
     full = reduced6_to_full_theta([rt_lat, batch_lat, ai_lat, queue_w, risk_scale, cloud_gate])
     names = list(CFG.FEATURE_NAMES)
@@ -800,6 +835,9 @@ def reduced7_to_full_theta(theta7):
         if name in names:
             full[names.index(name)] = float(value)
 
+    set_name("W_Queue", queue_w)
+    set_name("W_Risk_Scale", risk_scale)
+    set_name("Cloud_Gate", cloud_gate)
     set_name("W_RT_Energy", energy_scale)
     set_name("W_Batch_Energy", energy_scale)
     set_name("W_AI_Energy", energy_scale)
@@ -2112,6 +2150,10 @@ def _write_refactor_config_snapshot(output_dir, selected_keys=None, groups=None)
             "alpha_direct_ai_bounds": getattr(CFG, "ALPHA_DIRECT_AI_BOUNDS", None),
             "alpha_direct_fixed_theta": getattr(CFG, "ALPHA_DIRECT_FIXED_THETA", None),
             "alpha_direct_effective_bounds": get_alpha_direct_control_bounds(),
+            "reduced7_latency_weight_bounds": getattr(CFG, "REDUCED7_LATENCY_WEIGHT_BOUNDS", None),
+            "reduced7_queue_weight_bounds": getattr(CFG, "REDUCED7_QUEUE_WEIGHT_BOUNDS", None),
+            "reduced7_risk_scale_bounds": getattr(CFG, "REDUCED7_RISK_SCALE_BOUNDS", None),
+            "reduced7_cloud_gate_bounds": getattr(CFG, "REDUCED7_CLOUD_GATE_BOUNDS", None),
             "reduced7_energy_scale_bounds": getattr(CFG, "REDUCED7_ENERGY_SCALE_BOUNDS", None),
             "reduced7_effective_bounds": get_reduced7_control_bounds(),
             "reduced7_initial_anchor_mode": str(getattr(CFG, "REDUCED7_INITIAL_ANCHOR_MODE", "fixed5")),

@@ -475,6 +475,34 @@ def group_log_to_dataframe(log, group_key, group_label):
             "predicted_cost": _log_get_ffill(log, "predicted_cost", i, None),
             "actual_cost": _log_get_ffill(log, "actual_cost", i, None),
             "prediction_error": _log_get_ffill(log, "prediction_error", i, None),
+            "raw_sigma": _log_get_ffill(log, "raw_sigma", i, None),
+            "sigma_scale": _log_get_ffill(log, "sigma_scale", i, None),
+            "sigma_calibrated": _log_get_ffill(log, "sigma_calibrated", i, None),
+            "sigma_acq": _log_get_ffill(log, "sigma_acq", i, None),
+            "sigma_calibration_use_in_acq": _log_get_ffill(
+                log, "sigma_calibration_use_in_acq", i,
+                str(getattr(CFG, "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")),
+            ),
+            "sigma_calibration_eta": _log_get_ffill(log, "sigma_calibration_eta", i, None),
+            "sigma_acq_formula": _log_get_ffill(
+                log, "sigma_acq_formula", i,
+                (
+                    "sigma_acq=sigma_calibrated"
+                    if str(getattr(CFG, "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")).lower() == "true"
+                    else (
+                        f"sigma_acq=raw_sigma+{float(getattr(CFG, 'CBO_SIGMA_CALIBRATION_ETA', 0.25)):.6g}*(sigma_calibrated-raw_sigma)"
+                        if str(getattr(CFG, "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")).lower() == "soft"
+                        else "sigma_acq=raw_sigma"
+                    )
+                ),
+            ),
+            "raw_surprise": _log_get_ffill(log, "raw_surprise", i, None),
+            "calibrated_surprise": _log_get_ffill(log, "calibrated_surprise", i, None),
+            "calibration_buffer_size": _log_get_ffill(log, "calibration_buffer_size", i, None),
+            "sigma_scale_estimated": _log_get_ffill(log, "sigma_scale_estimated", i, None),
+            "sigma_scale_history_weight": _log_get_ffill(log, "sigma_scale_history_weight", i, None),
+            "sigma_calibration_enabled": _log_get_ffill(log, "sigma_calibration_enabled", i, None),
+            "sigma_floor": _log_get_ffill(log, "sigma_floor", i, None),
             "surprise": _log_get_ffill(log, "surprise", i, None),
             "prediction_error_valid": _log_get_ffill(log, "prediction_error_valid", i, None),
             "prediction_error_skipped_reason": _log_get_ffill(log, "prediction_error_skipped_reason", i, None),
