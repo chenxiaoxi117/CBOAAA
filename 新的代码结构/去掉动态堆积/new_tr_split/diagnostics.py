@@ -484,6 +484,29 @@ def group_log_to_dataframe(log, group_key, group_label):
                 str(getattr(CFG, "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")),
             ),
             "sigma_calibration_eta": _log_get_ffill(log, "sigma_calibration_eta", i, None),
+            "adaptive_scene_key": _log_get_ffill(log, "adaptive_scene_key", i, None),
+            "adaptive_exploration_demand": _log_get_ffill(log, "adaptive_exploration_demand", i, None),
+            "adaptive_exploration_target": _log_get_ffill(log, "adaptive_exploration_target", i, None),
+            "adaptive_beta": _log_get_ffill(log, "adaptive_beta", i, None),
+            "adaptive_eta": _log_get_ffill(log, "adaptive_eta", i, None),
+            "adaptive_data_need": _log_get_ffill(log, "adaptive_data_need", i, None),
+            "adaptive_data_need_linear": _log_get_ffill(log, "adaptive_data_need_linear", i, None),
+            "adaptive_reexplore_need": _log_get_ffill(log, "adaptive_reexplore_need", i, None),
+            "adaptive_reexplore_gain": _log_get_ffill(log, "adaptive_reexplore_gain", i, None),
+            "adaptive_stagnation": _log_get_ffill(log, "adaptive_stagnation", i, None),
+            "adaptive_uncertainty_need": _log_get_ffill(log, "adaptive_uncertainty_need", i, None),
+            "adaptive_safety_factor": _log_get_ffill(log, "adaptive_safety_factor", i, None),
+            "adaptive_dynamic_risk": _log_get_ffill(log, "adaptive_dynamic_risk", i, None),
+            "adaptive_effective_samples": _log_get_ffill(log, "adaptive_effective_samples", i, None),
+            "adaptive_progress_rate": _log_get_ffill(log, "adaptive_progress_rate", i, None),
+            "adaptive_risk_reason": _log_get_ffill(log, "adaptive_risk_reason", i, None),
+            "adaptive_risk_backlog": _log_get_ffill(log, "adaptive_risk_backlog", i, None),
+            "adaptive_risk_unfinished": _log_get_ffill(log, "adaptive_risk_unfinished", i, None),
+            "adaptive_risk_unfinished_trend": _log_get_ffill(log, "adaptive_risk_unfinished_trend", i, None),
+            "adaptive_risk_max_util": _log_get_ffill(log, "adaptive_risk_max_util", i, None),
+            "adaptive_plausible_margin": _log_get_ffill(log, "adaptive_plausible_margin", i, None),
+            "adaptive_plausible_fraction": _log_get_ffill(log, "adaptive_plausible_fraction", i, None),
+            "adaptive_plausible_margin_mult": _log_get_ffill(log, "adaptive_plausible_margin_mult", i, None),
             "sigma_acq_formula": _log_get_ffill(
                 log, "sigma_acq_formula", i,
                 (
@@ -492,7 +515,11 @@ def group_log_to_dataframe(log, group_key, group_label):
                     else (
                         f"sigma_acq=raw_sigma+{float(getattr(CFG, 'CBO_SIGMA_CALIBRATION_ETA', 0.25)):.6g}*(sigma_calibrated-raw_sigma)"
                         if str(getattr(CFG, "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")).lower() == "soft"
-                        else "sigma_acq=raw_sigma"
+                        else (
+                            "sigma_acq=raw_sigma+adaptive_eta*(sigma_calibrated-raw_sigma)"
+                            if str(getattr(CFG, "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")).lower() == "adaptive"
+                            else "sigma_acq=raw_sigma"
+                        )
                     )
                 ),
             ),

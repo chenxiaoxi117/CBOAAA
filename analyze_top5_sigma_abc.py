@@ -175,9 +175,9 @@ def pairwise_rows(segment_df: pd.DataFrame):
     metrics = ("eval_cost_mean", "normalized_tradeoff_mean", "positive_step_rebound_mean", "high_backlog_count", "high_unfinished_count")
     cbo = segment_df[segment_df["method"] == "CBO"]
     rows = []
-    for variant in ("V11-B_diag", "V11-C_soft"):
+    for variant in VARIANTS[1:]:
         for segment in [s[0] for s in SEGMENTS]:
-            a = cbo[(cbo.variant == "V11-A_off") & (cbo.segment == segment)].set_index("scene")
+            a = cbo[(cbo.variant == VARIANTS[0]) & (cbo.segment == segment)].set_index("scene")
             b = cbo[(cbo.variant == variant) & (cbo.segment == segment)].set_index("scene")
             common = a.index.intersection(b.index)
             for metric in metrics:
@@ -199,10 +199,13 @@ def pairwise_rows(segment_df: pd.DataFrame):
 
 
 def main():
+    global VARIANTS
     parser = argparse.ArgumentParser()
     parser.add_argument("result_root", type=Path)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--variants", nargs=3, default=list(VARIANTS), metavar=("A", "B", "C"), help="Three variant directory names; A is the pairwise baseline")
     args = parser.parse_args()
+    VARIANTS = tuple(args.variants)
 
     root = args.result_root.resolve()
     output = (args.output or (root / "analysis_sigma_abc")).resolve()

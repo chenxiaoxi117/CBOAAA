@@ -30,6 +30,15 @@ def _is_cbo_method_key(group_key, group_cfg=None):
     return ("cbo" in key) or ("cbo" in family) or ("cbo" in label)
 
 
+def _uses_adaptive_exploration(group_key=None, group_cfg=None, agent=None):
+    mode = None
+    if isinstance(group_cfg, dict):
+        mode = group_cfg.get("cbo_sigma_calibration_use_in_acq", None)
+    if mode is None and agent is not None:
+        mode = getattr(agent, "cbo_sigma_calibration_use_in_acq", None)
+    return str(mode or "").strip().lower() == "adaptive"
+
+
 def _deploy_policy_arg():
     val = getattr(CFG, "DEPLOY_POLICY_ARG", None)
     if val is None:
@@ -215,6 +224,18 @@ def apply_cbo_stability_policy_override(groups):
         "cbo_sigma_calibration_min_samples": _cbo_cli_option("--cbo-sigma-calibration-min-samples", "CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10),
         "cbo_sigma_calibration_use_in_acq": _cbo_cli_option("--cbo-sigma-calibration-use-in-acq", "CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false"),
         "cbo_sigma_calibration_eta": _cbo_cli_option("--cbo-sigma-calibration-eta", "CBO_SIGMA_CALIBRATION_ETA", 0.25),
+        "cbo_adaptive_exploration_beta_max": _cbo_cli_option("--cbo-adaptive-exploration-beta-max", "CBO_ADAPTIVE_EXPLORATION_BETA_MAX", 3.0),
+        "cbo_adaptive_exploration_eta_max": _cbo_cli_option("--cbo-adaptive-exploration-eta-max", "CBO_ADAPTIVE_EXPLORATION_ETA_MAX", 0.25),
+        "cbo_adaptive_exploration_window": _cbo_cli_option("--cbo-adaptive-exploration-window", "CBO_ADAPTIVE_EXPLORATION_WINDOW", 30),
+        "cbo_adaptive_exploration_sample_target": _cbo_cli_option("--cbo-adaptive-exploration-sample-target", "CBO_ADAPTIVE_EXPLORATION_SAMPLE_TARGET", 80),
+        "cbo_adaptive_exploration_smoothing": _cbo_cli_option("--cbo-adaptive-exploration-smoothing", "CBO_ADAPTIVE_EXPLORATION_SMOOTHING", 0.20),
+        "cbo_adaptive_exploration_progress_pct": _cbo_cli_option("--cbo-adaptive-exploration-progress-pct", "CBO_ADAPTIVE_EXPLORATION_PROGRESS_PCT", 0.01),
+        "cbo_adaptive_exploration_reexplore_gain": _cbo_cli_option("--cbo-adaptive-exploration-reexplore-gain", "CBO_ADAPTIVE_EXPLORATION_REEXPLORE_GAIN", 0.25),
+        "cbo_adaptive_exploration_plausible_margin_mult": _cbo_cli_option("--cbo-adaptive-exploration-plausible-margin-mult", "CBO_ADAPTIVE_EXPLORATION_PLAUSIBLE_MARGIN_MULT", 2.0),
+        "cbo_adaptive_exploration_backlog_ref": _cbo_cli_option("--cbo-adaptive-exploration-backlog-ref", "CBO_ADAPTIVE_EXPLORATION_BACKLOG_REF", 1.0),
+        "cbo_adaptive_exploration_unfinished_ref": _cbo_cli_option("--cbo-adaptive-exploration-unfinished-ref", "CBO_ADAPTIVE_EXPLORATION_UNFINISHED_REF", 0.10),
+        "cbo_adaptive_exploration_trend_ref": _cbo_cli_option("--cbo-adaptive-exploration-trend-ref", "CBO_ADAPTIVE_EXPLORATION_TREND_REF", 0.05),
+        "cbo_adaptive_exploration_max_util_start": _cbo_cli_option("--cbo-adaptive-exploration-max-util-start", "CBO_ADAPTIVE_EXPLORATION_MAX_UTIL_START", 0.80),
         "cbo_sigma_scale_default": _cbo_cli_option("--cbo-sigma-scale-default", "CBO_SIGMA_SCALE_DEFAULT", 4.0),
         "cbo_sigma_scale_min": _cbo_cli_option("--cbo-sigma-scale-min", "CBO_SIGMA_SCALE_MIN", 1.0),
         "cbo_sigma_scale_max": _cbo_cli_option("--cbo-sigma-scale-max", "CBO_SIGMA_SCALE_MAX", 6.0),
@@ -371,6 +392,10 @@ def method_history_policy_map(groups):
             "sigma_calibration_min_samples": group_cfg.get("cbo_sigma_calibration_min_samples", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10)),
             "sigma_calibration_use_in_acq": group_cfg.get("cbo_sigma_calibration_use_in_acq", _cfg_cbo_str("CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false")),
             "sigma_calibration_eta": group_cfg.get("cbo_sigma_calibration_eta", _cfg_cbo_float("CBO_SIGMA_CALIBRATION_ETA", 0.25)),
+            "adaptive_exploration_beta_max": group_cfg.get("cbo_adaptive_exploration_beta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_BETA_MAX", 3.0)),
+            "adaptive_exploration_eta_max": group_cfg.get("cbo_adaptive_exploration_eta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_ETA_MAX", 0.25)),
+            "adaptive_exploration_window": group_cfg.get("cbo_adaptive_exploration_window", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_WINDOW", 30)),
+            "adaptive_exploration_sample_target": group_cfg.get("cbo_adaptive_exploration_sample_target", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_SAMPLE_TARGET", 80)),
             "sigma_scale_default": group_cfg.get("cbo_sigma_scale_default", _cfg_cbo_float("CBO_SIGMA_SCALE_DEFAULT", 4.0)),
             "sigma_scale_min": group_cfg.get("cbo_sigma_scale_min", _cfg_cbo_float("CBO_SIGMA_SCALE_MIN", 1.0)),
             "sigma_scale_max": group_cfg.get("cbo_sigma_scale_max", _cfg_cbo_float("CBO_SIGMA_SCALE_MAX", 6.0)),
@@ -925,7 +950,7 @@ def _cbo_sigma_for_acquisition(agent, raw_sigma, sigma_calibrated):
         mode = "true"
     elif mode in {"0", "off", "no", "raw"}:
         mode = "false"
-    if mode not in {"false", "soft", "true"}:
+    if mode not in {"false", "soft", "adaptive", "true"}:
         mode = "false"
     eta = float(np.clip(getattr(agent, "cbo_sigma_calibration_eta", _cfg_cbo_float("CBO_SIGMA_CALIBRATION_ETA", 0.25)), 0.0, 1.0))
     if mode == "true":
@@ -934,6 +959,11 @@ def _cbo_sigma_for_acquisition(agent, raw_sigma, sigma_calibrated):
     elif mode == "soft":
         sigma_acq = raw + eta * (calibrated - raw)
         formula = f"sigma_acq=raw_sigma+{eta:.6g}*(sigma_calibrated-raw_sigma)"
+    elif mode == "adaptive":
+        adaptive = dict(getattr(agent, "cbo_last_adaptive_exploration_info", {}) or {})
+        eta = float(np.clip(adaptive.get("adaptive_eta", 0.0), 0.0, 1.0))
+        sigma_acq = raw + eta * (calibrated - raw)
+        formula = f"sigma_acq=raw_sigma+adaptive_eta({eta:.6g})*(sigma_calibrated-raw_sigma)"
     else:
         sigma_acq = raw
         formula = "sigma_acq=raw_sigma"
@@ -942,6 +972,109 @@ def _cbo_sigma_for_acquisition(agent, raw_sigma, sigma_calibrated):
         "sigma_calibration_eta": eta,
         "sigma_acq_formula": formula,
     }
+
+
+def _cbo_adaptive_scene_key(agent):
+    stable_key = str(getattr(agent, "_active_external_scene_key", "") or "").strip()
+    if stable_key:
+        return stable_key
+    external = list(getattr(agent, "_active_external_context", []) or [])
+    if not external:
+        return "default"
+    vals = []
+    for value in external:
+        try:
+            vals.append(f"{float(value):.1f}")
+        except Exception:
+            vals.append(str(value))
+    return "|".join(vals)
+
+
+def _cbo_adaptive_exploration_info(agent, context, effective_samples, sigma_scale):
+    window = max(4, int(getattr(agent, "cbo_adaptive_exploration_window", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_WINDOW", 30))))
+    sample_target = max(1, int(getattr(agent, "cbo_adaptive_exploration_sample_target", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_SAMPLE_TARGET", 80))))
+    smoothing = float(np.clip(getattr(agent, "cbo_adaptive_exploration_smoothing", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_SMOOTHING", 0.20)), 0.0, 1.0))
+    progress_ref = max(1e-9, float(getattr(agent, "cbo_adaptive_exploration_progress_pct", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_PROGRESS_PCT", 0.01))))
+    reexplore_gain = float(np.clip(getattr(agent, "cbo_adaptive_exploration_reexplore_gain", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_REEXPLORE_GAIN", 0.25)), 0.0, 1.0))
+    beta_max = max(0.0, float(getattr(agent, "cbo_adaptive_exploration_beta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_BETA_MAX", 3.0))))
+    eta_max = float(np.clip(getattr(agent, "cbo_adaptive_exploration_eta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_ETA_MAX", 0.25)), 0.0, 1.0))
+
+    n_eff = max(0, int(effective_samples or 0))
+    data_need_linear = float(np.clip(1.0 - n_eff / float(sample_target), 0.0, 1.0))
+    data_need = float(np.sqrt(data_need_linear))
+    scene_key = _cbo_adaptive_scene_key(agent)
+    cost_by_scene = dict(getattr(agent, "cbo_adaptive_cost_history_by_scene", {}) or {})
+    costs = np.asarray([v for v in list(cost_by_scene.get(scene_key, []) or []) if np.isfinite(float(v))], dtype=float)
+    progress_rate = np.nan
+    stagnation = 1.0
+    if len(costs) >= window:
+        recent = costs[-window:]
+        mid = max(1, len(recent) // 2)
+        old_mean = float(np.mean(recent[:mid]))
+        new_mean = float(np.mean(recent[mid:]))
+        progress_rate = (old_mean - new_mean) / max(abs(old_mean), 1e-12)
+        stagnation = float(np.clip(1.0 - max(0.0, progress_rate) / progress_ref, 0.0, 1.0))
+
+    scale_default = max(1.0 + 1e-9, float(getattr(agent, "cbo_sigma_scale_default", _cfg_cbo_float("CBO_SIGMA_SCALE_DEFAULT", 4.0))))
+    uncertainty_need = float(np.clip((float(sigma_scale) - 1.0) / (scale_default - 1.0), 0.0, 1.0))
+
+    ctx = _cbo_context_name_map(agent, context)
+    backlog = max(0.0, float(ctx.get("start_backlog_norm", 0.0) or 0.0))
+    unfinished = max(0.0, float(ctx.get("prev_unfinished_rate", 0.0) or 0.0))
+    unfinished_trend = max(0.0, float(ctx.get("unfinished_rate_trend", 0.0) or 0.0))
+    max_util = float(np.clip(ctx.get("start_max_util", 0.0) or 0.0, 0.0, 1.0))
+    backlog_ref = max(1e-9, float(getattr(agent, "cbo_adaptive_exploration_backlog_ref", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_BACKLOG_REF", 1.0))))
+    unfinished_ref = max(1e-9, float(getattr(agent, "cbo_adaptive_exploration_unfinished_ref", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_UNFINISHED_REF", 0.10))))
+    trend_ref = max(1e-9, float(getattr(agent, "cbo_adaptive_exploration_trend_ref", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_TREND_REF", 0.05))))
+    util_start = float(np.clip(getattr(agent, "cbo_adaptive_exploration_max_util_start", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_MAX_UTIL_START", 0.80)), 0.0, 0.999999))
+    risk_parts = {
+        "backlog": float(np.clip(backlog / backlog_ref, 0.0, 1.0)),
+        "unfinished": float(np.clip(unfinished / unfinished_ref, 0.0, 1.0)),
+        "unfinished_trend": float(np.clip(unfinished_trend / trend_ref, 0.0, 1.0)),
+        "max_util": float(np.clip((max_util - util_start) / max(1e-9, 1.0 - util_start), 0.0, 1.0)),
+    }
+    dynamic_pressure = max(risk_parts["backlog"], risk_parts["unfinished_trend"])
+    risk_components = {
+        "backlog": risk_parts["backlog"],
+        "unfinished_dynamic": min(risk_parts["unfinished"], dynamic_pressure),
+        "max_util_dynamic": min(risk_parts["max_util"], dynamic_pressure),
+    }
+    risk = max(risk_components.values())
+    safety_factor = float(np.clip(1.0 - risk, 0.0, 1.0))
+    reexplore_need = float(reexplore_gain * stagnation * uncertainty_need)
+    demand_target = float(np.clip(max(data_need, reexplore_need) * safety_factor, 0.0, 1.0))
+
+    states = dict(getattr(agent, "cbo_adaptive_exploration_state_by_scene", {}) or {})
+    previous = states.get(scene_key, {}).get("demand")
+    demand = demand_target if previous is None else (1.0 - smoothing) * float(previous) + smoothing * demand_target
+    demand = float(np.clip(demand, 0.0, 1.0))
+    states[scene_key] = {"demand": demand}
+    agent.cbo_adaptive_exploration_state_by_scene = states
+    reason = max(risk_components, key=risk_components.get) if risk > 0.0 else "none"
+    info = {
+        "adaptive_scene_key": scene_key,
+        "adaptive_exploration_demand": demand,
+        "adaptive_exploration_target": demand_target,
+        "adaptive_beta": beta_max * demand,
+        "adaptive_eta": eta_max * demand,
+        "adaptive_data_need": data_need,
+        "adaptive_data_need_linear": data_need_linear,
+        "adaptive_reexplore_need": reexplore_need,
+        "adaptive_reexplore_gain": reexplore_gain,
+        "adaptive_stagnation": stagnation,
+        "adaptive_uncertainty_need": uncertainty_need,
+        "adaptive_safety_factor": safety_factor,
+        "adaptive_dynamic_risk": risk,
+        "adaptive_effective_samples": n_eff,
+        "adaptive_progress_rate": float(progress_rate) if np.isfinite(progress_rate) else np.nan,
+        "adaptive_risk_reason": reason,
+        "adaptive_risk_backlog": risk_parts["backlog"],
+        "adaptive_risk_unfinished": risk_parts["unfinished"],
+        "adaptive_risk_unfinished_trend": risk_parts["unfinished_trend"],
+        "adaptive_risk_max_util": risk_parts["max_util"],
+    }
+    agent.cbo_last_adaptive_exploration_info = dict(info)
+    return info
 
 
 def _cbo_set_pending_sigma_calibration(agent, theta, predicted_cost, raw_sigma, sigma_scale, sigma_calibrated, sigma_acq):
@@ -1569,14 +1702,50 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
             mu_np = mu.detach().cpu().numpy()
             raw_sigma_np = sigma.detach().cpu().numpy()
             sigma_calibrated_np, calibration_info = _cbo_calibrate_sigma(agent, raw_sigma_np)
+            sigma_mode = str(getattr(agent, "cbo_sigma_calibration_use_in_acq", "false") or "false").strip().lower()
+            adaptive_info = {}
+            if sigma_mode == "adaptive":
+                try:
+                    effective_samples = int(gp.train_inputs[0].shape[-2])
+                except Exception:
+                    effective_samples = len(list(getattr(agent, "local_recent", []) or []))
+                adaptive_info = _cbo_adaptive_exploration_info(
+                    agent, context, effective_samples, calibration_info.get("sigma_scale", 1.0),
+                )
             sigma_acq_np, sigma_acq_info = _cbo_sigma_for_acquisition(agent, raw_sigma_np, sigma_calibrated_np)
             beta_info = _cbo_beta_eff_info(agent)
-            score_np = mu_np + float(beta_info.get("beta_eff", getattr(agent, "cbo_acq_beta", getattr(agent, "beta_init", 3.0)))) * sigma_acq_np
+            beta_used = float(beta_info.get("beta_eff", getattr(agent, "cbo_acq_beta", getattr(agent, "beta_init", 3.0))))
+            plausible_margin = np.inf
+            plausible_fraction = 1.0
+            if sigma_mode == "adaptive":
+                beta_used = float(adaptive_info.get("adaptive_beta", 0.0))
+                buffer = list(getattr(agent, "cbo_sigma_calibration_buffer", []) or [])
+                min_rows = max(1, int(getattr(agent, "cbo_sigma_calibration_min_samples", 10)))
+                errors = [
+                    float(row.get("prediction_error")) for row in buffer
+                    if isinstance(row, dict) and np.isfinite(float(row.get("prediction_error", np.nan)))
+                ]
+                if len(errors) >= min_rows:
+                    margin_mult = max(0.0, float(getattr(agent, "cbo_adaptive_exploration_plausible_margin_mult", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_PLAUSIBLE_MARGIN_MULT", 2.0))))
+                    plausible_margin = margin_mult * float(np.sqrt(np.mean(np.square(np.asarray(errors, dtype=float)))))
+                plausible = np.ones(len(mu_np), dtype=bool) if not np.isfinite(plausible_margin) else (mu_np >= float(np.nanmax(mu_np)) - plausible_margin)
+                plausible_fraction = float(np.mean(plausible)) if len(plausible) else 1.0
+                score_np = mu_np + np.where(plausible, beta_used * sigma_acq_np, 0.0)
+            else:
+                score_np = mu_np + beta_used * sigma_acq_np
             score_np, service_penalty, guard_info = _cbo_service_guard_apply(agent, score_np)
+            beta_info["beta_eff"] = beta_used
+            beta_info["actual_beta_used"] = beta_used
+            beta_info["adaptive_plausible_margin"] = float(plausible_margin) if np.isfinite(plausible_margin) else np.nan
+            beta_info["adaptive_plausible_fraction"] = plausible_fraction
+            beta_info["adaptive_plausible_margin_mult"] = max(0.0, float(getattr(agent, "cbo_adaptive_exploration_plausible_margin_mult", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_PLAUSIBLE_MARGIN_MULT", 2.0))))
+            beta_info.update(adaptive_info)
+            agent.cbo_last_beta_eff = beta_used
+            agent.cbo_last_actual_beta_used = beta_used
             beta_info.update(guard_info)
             beta_info.update(calibration_info)
             beta_info.update(sigma_acq_info)
-            beta_info["actual_score_formula"] = "mu + beta_eff * sigma_acq"
+            beta_info["actual_score_formula"] = "mu + adaptive_beta * sigma_acq within RMSE margin" if sigma_mode == "adaptive" else "mu + beta_eff * sigma_acq"
             try:
                 agent.cbo_last_beta_info = dict(beta_info)
             except Exception:
@@ -1862,6 +2031,13 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "predicted_cost", "actual_cost", "prediction_error", "raw_sigma", "sigma_scale",
             "sigma_calibrated", "sigma_acq", "sigma_calibration_use_in_acq",
             "sigma_calibration_eta", "sigma_acq_formula",
+            "adaptive_scene_key", "adaptive_exploration_demand", "adaptive_exploration_target",
+            "adaptive_beta", "adaptive_eta", "adaptive_data_need", "adaptive_data_need_linear",
+            "adaptive_reexplore_need", "adaptive_reexplore_gain", "adaptive_stagnation",
+            "adaptive_uncertainty_need", "adaptive_safety_factor", "adaptive_dynamic_risk", "adaptive_effective_samples",
+            "adaptive_progress_rate", "adaptive_risk_reason", "adaptive_risk_backlog",
+            "adaptive_risk_unfinished", "adaptive_risk_unfinished_trend", "adaptive_risk_max_util",
+            "adaptive_plausible_margin", "adaptive_plausible_fraction", "adaptive_plausible_margin_mult",
             "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
             "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
             "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
@@ -3640,6 +3816,23 @@ def build_external_context_vector(fac, base_context=None):
     ]
 
 
+def build_external_scene_key(fac):
+    now = float(getattr(fac, "current_time", 0.0))
+    try:
+        lam, _ = fac.workload._get_lambda(now)
+        lam = float(lam)
+    except Exception:
+        lam = float(getattr(CFG, "BATCH_POISSON_LAMBDA", 0.0))
+    try:
+        probs = get_task_type_probs_at_time(now)
+    except Exception:
+        probs = _normalize_task_probs(getattr(CFG, "TASK_TYPE_PROBS", {"RT": 1/3, "Batch": 1/3, "AI": 1/3}))
+    rt = int(round(100.0 * float(probs.get("RT", 0.0))))
+    batch = int(round(100.0 * float(probs.get("Batch", 0.0))))
+    ai = int(round(100.0 * float(probs.get("AI", 0.0))))
+    return f"lambda_{lam:.3g}_mix_{rt}_{batch}_{ai}"
+
+
 def build_lite_context_vector(fac, base_context=None):
     """构造 CBO-lite 的窗口开始状态。
 
@@ -3916,6 +4109,20 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_sigma_calibration_min_samples = max(1, int(group_cfg.get("cbo_sigma_calibration_min_samples", _cfg_cbo_int("CBO_SIGMA_CALIBRATION_MIN_SAMPLES", 10))))
     agent.cbo_sigma_calibration_use_in_acq = str(group_cfg.get("cbo_sigma_calibration_use_in_acq", _cfg_cbo_str("CBO_SIGMA_CALIBRATION_USE_IN_ACQ", "false"))).strip().lower()
     agent.cbo_sigma_calibration_eta = float(np.clip(group_cfg.get("cbo_sigma_calibration_eta", _cfg_cbo_float("CBO_SIGMA_CALIBRATION_ETA", 0.25)), 0.0, 1.0))
+    agent.cbo_adaptive_exploration_beta_max = max(0.0, float(group_cfg.get("cbo_adaptive_exploration_beta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_BETA_MAX", 3.0))))
+    agent.cbo_adaptive_exploration_eta_max = float(np.clip(group_cfg.get("cbo_adaptive_exploration_eta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_ETA_MAX", 0.25)), 0.0, 1.0))
+    agent.cbo_adaptive_exploration_window = max(4, int(group_cfg.get("cbo_adaptive_exploration_window", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_WINDOW", 30))))
+    agent.cbo_adaptive_exploration_sample_target = max(1, int(group_cfg.get("cbo_adaptive_exploration_sample_target", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_SAMPLE_TARGET", 80))))
+    agent.cbo_adaptive_exploration_smoothing = float(np.clip(group_cfg.get("cbo_adaptive_exploration_smoothing", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_SMOOTHING", 0.20)), 0.0, 1.0))
+    agent.cbo_adaptive_exploration_progress_pct = max(1e-9, float(group_cfg.get("cbo_adaptive_exploration_progress_pct", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_PROGRESS_PCT", 0.01))))
+    agent.cbo_adaptive_exploration_reexplore_gain = float(np.clip(group_cfg.get("cbo_adaptive_exploration_reexplore_gain", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_REEXPLORE_GAIN", 0.25)), 0.0, 1.0))
+    agent.cbo_adaptive_exploration_plausible_margin_mult = max(0.0, float(group_cfg.get("cbo_adaptive_exploration_plausible_margin_mult", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_PLAUSIBLE_MARGIN_MULT", 2.0))))
+    agent.cbo_adaptive_exploration_backlog_ref = max(1e-9, float(group_cfg.get("cbo_adaptive_exploration_backlog_ref", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_BACKLOG_REF", 1.0))))
+    agent.cbo_adaptive_exploration_unfinished_ref = max(1e-9, float(group_cfg.get("cbo_adaptive_exploration_unfinished_ref", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_UNFINISHED_REF", 0.10))))
+    agent.cbo_adaptive_exploration_trend_ref = max(1e-9, float(group_cfg.get("cbo_adaptive_exploration_trend_ref", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_TREND_REF", 0.05))))
+    agent.cbo_adaptive_exploration_max_util_start = float(np.clip(group_cfg.get("cbo_adaptive_exploration_max_util_start", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_MAX_UTIL_START", 0.80)), 0.0, 0.999999))
+    agent.cbo_adaptive_exploration_state_by_scene = dict(getattr(agent, "cbo_adaptive_exploration_state_by_scene", {}) or {})
+    agent.cbo_adaptive_cost_history_by_scene = dict(getattr(agent, "cbo_adaptive_cost_history_by_scene", {}) or {})
     agent.cbo_sigma_scale_default = float(group_cfg.get("cbo_sigma_scale_default", _cfg_cbo_float("CBO_SIGMA_SCALE_DEFAULT", 4.0)))
     agent.cbo_sigma_scale_min = float(group_cfg.get("cbo_sigma_scale_min", _cfg_cbo_float("CBO_SIGMA_SCALE_MIN", 1.0)))
     agent.cbo_sigma_scale_max = float(group_cfg.get("cbo_sigma_scale_max", _cfg_cbo_float("CBO_SIGMA_SCALE_MAX", 6.0)))
@@ -5713,6 +5920,16 @@ def _cbo_update_good_region_memory(agent, iteration, theta, eval_cost, safe_info
     except Exception:
         costs.append(np.nan)
     agent.cbo_eval_cost_history = costs
+    try:
+        scene_key = _cbo_adaptive_scene_key(agent)
+        by_scene = dict(getattr(agent, "cbo_adaptive_cost_history_by_scene", {}) or {})
+        scene_costs = list(by_scene.get(scene_key, []) or [])
+        scene_costs.append(float(eval_cost))
+        keep = max(100, 4 * int(getattr(agent, "cbo_adaptive_exploration_window", 30)))
+        by_scene[scene_key] = scene_costs[-keep:]
+        agent.cbo_adaptive_cost_history_by_scene = by_scene
+    except Exception:
+        pass
     rolling = np.nan
     if len(costs) >= window:
         recent = np.asarray(costs[-window:], dtype=float)
@@ -6045,6 +6262,10 @@ USER_METHOD_ALIASES = {
     "reduced7_fixed_tuned": "reduced7_fixed_tuned",
     "reduced7-bo-greedy": "reduced7_bo_greedy",
     "reduced7_bo_greedy": "reduced7_bo_greedy",
+    "reduced7-bo-adaptive": "reduced7_bo_adaptive",
+    "reduced7_bo_adaptive": "reduced7_bo_adaptive",
+    "bo-adaptive": "reduced7_bo_adaptive",
+    "bo_adaptive": "reduced7_bo_adaptive",
     "reduced7-cbo": "reduced7_cbo_lite_pressure_taskmix_counts",
     "reduced7_cbo": "reduced7_cbo_lite_pressure_taskmix_counts",
     "reduced7-cbo-ptc": "reduced7_cbo_lite_pressure_taskmix_counts",
@@ -6820,6 +7041,7 @@ def run_scenario_group(seed, group_key, group_cfg):
             try:
                 fac.agent._active_external_context = list(external_ctx)
                 fac.agent._active_external_context_feature_names = list(EXTERNAL_CONTEXT_FEATURE_NAMES)
+                fac.agent._active_external_scene_key = build_external_scene_key(fac)
             except Exception:
                 pass
             theta_control, safe_info = _safebo_select_theta(fac.agent, state=ask_state, context=ask_ctx, group_cfg=group_cfg)
@@ -6939,7 +7161,7 @@ def run_scenario_group(seed, group_key, group_cfg):
 
         safe_info["best_so_far_cost"] = -float(fac.agent.prev_best_value) if (fac.agent is not None and getattr(fac.agent, "prev_best_value", None) is not None) else safe_info.get("best_so_far_cost")
         safe_info["best_so_far_iter"] = getattr(fac.agent, "prev_best_iter", safe_info.get("best_so_far_iter")) if fac.agent is not None else safe_info.get("best_so_far_iter")
-        if fac.agent is not None and _is_cbo_method_key(group_key, group_cfg):
+        if fac.agent is not None and (_is_cbo_method_key(group_key, group_cfg) or _uses_adaptive_exploration(group_key, group_cfg, fac.agent)):
             tell_debug = dict(getattr(fac.agent, "last_debug_info", {}) or {})
             for post_tell_key in [
                 "tr_update_mode", "tr_baseline_mean", "tr_current_mean", "tr_improve_pct",
@@ -6948,6 +7170,13 @@ def run_scenario_group(seed, group_key, group_cfg):
                 "cbo_tr_success_count", "cbo_tr_failure_count", "predicted_cost", "actual_cost",
                 "prediction_error", "raw_sigma", "sigma_scale", "sigma_calibrated", "sigma_acq",
                 "sigma_calibration_use_in_acq", "sigma_calibration_eta", "sigma_acq_formula",
+                "adaptive_scene_key", "adaptive_exploration_demand", "adaptive_exploration_target",
+                "adaptive_beta", "adaptive_eta", "adaptive_data_need", "adaptive_data_need_linear",
+                "adaptive_reexplore_need", "adaptive_reexplore_gain", "adaptive_stagnation",
+                "adaptive_uncertainty_need", "adaptive_safety_factor", "adaptive_dynamic_risk", "adaptive_effective_samples",
+                "adaptive_progress_rate", "adaptive_risk_reason", "adaptive_risk_backlog",
+                "adaptive_risk_unfinished", "adaptive_risk_unfinished_trend", "adaptive_risk_max_util",
+                "adaptive_plausible_margin", "adaptive_plausible_fraction", "adaptive_plausible_margin_mult",
                 "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
                 "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
                 "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct", "residual_trigger",
@@ -6968,8 +7197,10 @@ def run_scenario_group(seed, group_key, group_cfg):
                 safe_info["runtime_anchor_override_reason"] = f"runtime_anchor_override={override_mode}"
             if _is_missing_value(safe_info.get("anchor_override_reason")) and override_used:
                 safe_info["anchor_override_reason"] = f"runtime_anchor_override={override_mode}"
-        if fac.agent is not None and _is_cbo_method_key(group_key, group_cfg):
+        if fac.agent is not None and (_is_cbo_method_key(group_key, group_cfg) or _uses_adaptive_exploration(group_key, group_cfg, fac.agent)):
             safe_info = _cbo_update_good_region_memory(fac.agent, i + 1, theta_control, float(metrics.get("cost", np.nan)), safe_info)
+            if str(getattr(fac.agent, "cbo_sigma_calibration_use_in_acq", "false")).strip().lower() == "adaptive":
+                safe_info.update(dict(getattr(fac.agent, "cbo_last_adaptive_exploration_info", {}) or {}))
             _, sigma_acq_diag = _cbo_sigma_for_acquisition(fac.agent, [0.0], [0.0])
             safe_info.update(sigma_acq_diag)
         for diag_key in [
@@ -7014,6 +7245,13 @@ def run_scenario_group(seed, group_key, group_cfg):
             "predicted_cost", "actual_cost", "prediction_error", "raw_sigma", "sigma_scale",
             "sigma_calibrated", "sigma_acq", "sigma_calibration_use_in_acq",
             "sigma_calibration_eta", "sigma_acq_formula",
+            "adaptive_scene_key", "adaptive_exploration_demand", "adaptive_exploration_target",
+            "adaptive_beta", "adaptive_eta", "adaptive_data_need", "adaptive_data_need_linear",
+            "adaptive_reexplore_need", "adaptive_reexplore_gain", "adaptive_stagnation",
+            "adaptive_uncertainty_need", "adaptive_safety_factor", "adaptive_dynamic_risk", "adaptive_effective_samples",
+            "adaptive_progress_rate", "adaptive_risk_reason", "adaptive_risk_backlog",
+            "adaptive_risk_unfinished", "adaptive_risk_unfinished_trend", "adaptive_risk_max_util",
+            "adaptive_plausible_margin", "adaptive_plausible_fraction", "adaptive_plausible_margin_mult",
             "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
             "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
             "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
