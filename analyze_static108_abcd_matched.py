@@ -36,6 +36,9 @@ METHOD_PREFIXES = {
     "BO": "reduced7_bo_greedy",
     "BO_ADAPTIVE": "reduced7_bo_adaptive",
     "CBO": "reduced7_cbo_lite_pressure_taskmix_counts",
+    "CBO_I4": "reduced7_cbo_lite_internal4",
+    "CBO_I6CTX": "reduced7_cbo_lite_internal6_context",
+    "CBO_I4CTX": "reduced7_cbo_lite_internal4_context",
 }
 
 METRICS = {
@@ -101,7 +104,7 @@ def numeric(df: pd.DataFrame, col: str | None) -> pd.Series:
 
 
 def load_variant_rows(variant: str, root: Path, method_label: str, scene_filter: set[str] | None) -> pd.DataFrame:
-    prefix = METHOD_PREFIXES[method_label]
+    prefix = METHOD_PREFIXES.get(method_label, method_label)
     rows = []
     seed = infer_seed(root)
     for path in root.rglob(f"{prefix}*round_summary*.csv"):
@@ -198,8 +201,6 @@ def parse_variant_spec(spec: str) -> tuple[str, Path, str]:
     if len(parts) != 3:
         raise argparse.ArgumentTypeError("Variant spec must be NAME=ROOT=METHOD, e.g. A=result/...=BO")
     name, root, method = parts
-    if method not in METHOD_PREFIXES:
-        raise argparse.ArgumentTypeError(f"Unknown method label {method}; use one of {sorted(METHOD_PREFIXES)}")
     return name, Path(root), method
 
 

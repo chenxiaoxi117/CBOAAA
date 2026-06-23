@@ -1,96 +1,28 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Static108 V16 B/C ablation for seed-level checks.
-# B: BO + adaptive exploration, no context, no external gate.
-# C: CBO internal6 + external gate, no adaptive exploration.
+# Static108 V17 internal-context CBO variants with adaptive exploration.
+# Default methods:
+#   B      = reduced7_bo_adaptive
+#   D      = reduced7_cbo_lite_pressure_taskmix_counts + adaptive exploration
+#   D-I4   = reduced7_cbo_lite_internal4 + adaptive exploration
+#   D-I6C  = reduced7_cbo_lite_internal6_context + adaptive exploration
+#   D-I4C  = reduced7_cbo_lite_internal4_context + adaptive exploration
+#
 # Usage:
-#   MAX_JOBS=10 VARIANT=a  bash run_static108_v16_bc_ablation.sh 43
-#   MAX_JOBS=10 VARIANT=b  bash run_static108_v16_bc_ablation.sh 43
-#   MAX_JOBS=10 VARIANT=c  bash run_static108_v16_bc_ablation.sh 43
-#   MAX_JOBS=10 VARIANT=bc bash run_static108_v16_bc_ablation.sh 43
-#   MAX_JOBS=10 VARIANT=cmods  bash run_static108_v16_bc_ablation.sh 43
-#   MAX_JOBS=10 VARIANT=bcmods bash run_static108_v16_bc_ablation.sh 43
+#   MAX_JOBS=10 bash run_static108_v17_internal_context_adaptive.sh 43
 
 ROOT="${ROOT:-/home/ecs-user/CBO}"
 SEED="${1:-43}"
 MAX_JOBS="${MAX_JOBS:-10}"
-VARIANT="${VARIANT:-bc}"
-REFERENCE_METHOD="reduced7_cbo_lite_pressure_taskmix_counts"
-
-case "$VARIANT" in
-  a|A)
-    METHODS="reduced7_bo_greedy"
-    EXPECTED_ROUND_FILES=108
-    TAG="a_bo_greedy_pure"
-    ;;
-  b|B)
-    METHODS="reduced7_bo_adaptive"
-    EXPECTED_ROUND_FILES=108
-    TAG="b_bo_adaptive"
-    ;;
-  ab|AB|a_b|A_B)
-    METHODS="reduced7_bo_greedy,reduced7_bo_adaptive"
-    EXPECTED_ROUND_FILES=216
-    TAG="ab"
-    ;;
-  c|C)
-    METHODS="reduced7_cbo_lite_pressure_taskmix_counts"
-    EXPECTED_ROUND_FILES=108
-    TAG="c_cbo_noadaptive"
-    ;;
-  i4|I4|c_i4|C_I4)
-    METHODS="reduced7_cbo_lite_internal4"
-    EXPECTED_ROUND_FILES=108
-    TAG="c_i4_noadaptive"
-    REFERENCE_METHOD="reduced7_cbo_lite_internal4"
-    ;;
-  i6ctx|I6CTX|c_i6ctx|C_I6CTX)
-    METHODS="reduced7_cbo_lite_internal6_context"
-    EXPECTED_ROUND_FILES=108
-    TAG="c_i6ctx_noadaptive"
-    REFERENCE_METHOD="reduced7_cbo_lite_internal6_context"
-    ;;
-  i4ctx|I4CTX|c_i4ctx|C_I4CTX)
-    METHODS="reduced7_cbo_lite_internal4_context"
-    EXPECTED_ROUND_FILES=108
-    TAG="c_i4ctx_noadaptive"
-    REFERENCE_METHOD="reduced7_cbo_lite_internal4_context"
-    ;;
-  cmods|CMODS|c_mods|C_MODS)
-    METHODS="reduced7_cbo_lite_pressure_taskmix_counts,reduced7_cbo_lite_internal4,reduced7_cbo_lite_internal6_context,reduced7_cbo_lite_internal4_context"
-    EXPECTED_ROUND_FILES=432
-    TAG="cmods_noadaptive"
-    ;;
-  ac|AC|a_c|A_C)
-    METHODS="reduced7_bo_greedy,reduced7_cbo_lite_pressure_taskmix_counts"
-    EXPECTED_ROUND_FILES=216
-    TAG="ac"
-    ;;
-  abc|ABC|a_b_c|A_B_C)
-    METHODS="reduced7_bo_greedy,reduced7_bo_adaptive,reduced7_cbo_lite_pressure_taskmix_counts"
-    EXPECTED_ROUND_FILES=324
-    TAG="abc"
-    ;;
-  bc|BC|b_c|B_C)
-    METHODS="reduced7_bo_adaptive,reduced7_cbo_lite_pressure_taskmix_counts"
-    EXPECTED_ROUND_FILES=216
-    TAG="bc"
-    ;;
-  bcmods|BCMODS|b_cmods|B_CMODS)
-    METHODS="reduced7_bo_adaptive,reduced7_cbo_lite_pressure_taskmix_counts,reduced7_cbo_lite_internal4,reduced7_cbo_lite_internal6_context,reduced7_cbo_lite_internal4_context"
-    EXPECTED_ROUND_FILES=540
-    TAG="bcmods"
-    ;;
-  *)
-    echo "VARIANT must be a, b, c, i4, i6ctx, i4ctx, cmods, ab, ac, abc, bc, or bcmods" >&2
-    exit 2
-    ;;
-esac
-
-OUT="${OUT:-$ROOT/result/static108_v16_${TAG}_s${SEED}}"
+METHODS="${METHODS:-reduced7_bo_adaptive,reduced7_cbo_lite_pressure_taskmix_counts,reduced7_cbo_lite_internal4,reduced7_cbo_lite_internal6_context,reduced7_cbo_lite_internal4_context}"
+REFERENCE_METHOD="${REFERENCE_METHOD:-reduced7_cbo_lite_pressure_taskmix_counts}"
+OUT="${OUT:-$ROOT/result/static108_v17_internal_context_adaptive_s${SEED}}"
 LOG_DIR="$OUT/logs"
 FAIL_FILE="$OUT/failed_jobs.txt"
+
+method_count=$(awk -F',' '{print NF}' <<< "$METHODS")
+EXPECTED_ROUND_FILES=$((108 * method_count))
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -115,7 +47,7 @@ run_case() {
   fi
 
   mkdir -p "$case_out"
-  echo "[RUN ] lambda=$lam $scene seed=$SEED variant=$VARIANT methods=$METHODS"
+  echo "[RUN ] lambda=$lam $scene seed=$SEED methods=$METHODS"
   python -m new_tr_split \
     --mode pressure_scan \
     --selected-keys "$METHODS" \
@@ -136,6 +68,15 @@ run_case() {
     --cbo-shared-reference-warmup-rounds 5 \
     --cbo-reference-source-method-key "$REFERENCE_METHOD" \
     --cbo-backlog-growth-penalty-weight 0 \
+    --cbo-sigma-calibration on \
+    --cbo-sigma-calibration-buffer-size 50 \
+    --cbo-sigma-calibration-min-samples 10 \
+    --cbo-sigma-calibration-use-in-acq adaptive \
+    --cbo-sigma-calibration-eta 0.25 \
+    --cbo-sigma-scale-default 4.0 \
+    --cbo-sigma-scale-min 1.0 \
+    --cbo-sigma-scale-max 6.0 \
+    --cbo-sigma-floor 0.03 \
     --scheduler-score-norm-mode candidate_minmax_deadline \
     --task-adaptation \
     --lambda-values "$lam" \
@@ -155,14 +96,14 @@ run_case() {
 }
 
 echo "============================================================"
-echo "Static108 V16 B/C ablation"
+echo "Static108 V17 internal-context adaptive ablation"
 echo "ROOT=$ROOT"
 echo "OUT=$OUT"
 echo "SEED=$SEED"
 echo "MAX_JOBS=$MAX_JOBS"
-echo "VARIANT=$VARIANT"
 echo "METHODS=$METHODS"
 echo "REFERENCE_METHOD=$REFERENCE_METHOD"
+echo "EXPECTED_ROUND_FILES=$EXPECTED_ROUND_FILES"
 echo "============================================================"
 
 running=0
@@ -193,7 +134,7 @@ config_count=$(find "$OUT" -name refactor_run_config.json -type f | wc -l)
 round_count=$(find "$OUT" -name '*round_summary*.csv' -type f | wc -l)
 
 echo "============================================================"
-echo "Static108 V16 B/C ablation finished"
+echo "Static108 V17 internal-context adaptive ablation finished"
 echo "pressure summaries = $summary_count / 108"
 echo "refactor configs   = $config_count / 108"
 echo "round summaries    = $round_count / $EXPECTED_ROUND_FILES"
