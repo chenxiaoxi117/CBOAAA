@@ -107,7 +107,10 @@ def load_variant_rows(variant: str, root: Path, method_label: str, scene_filter:
     prefix = METHOD_PREFIXES.get(method_label, method_label)
     rows = []
     seed = infer_seed(root)
-    for path in root.rglob(f"{prefix}*round_summary*.csv"):
+    # Match the exact method prefix. A loose glob such as
+    # ``reduced7_cbo_lite_internal4*`` also matches
+    # ``reduced7_cbo_lite_internal4_context`` and silently mixes variants.
+    for path in root.rglob(f"{prefix}_round_summary*.csv"):
         rel = path.relative_to(root)
         lambda_tag = next((part for part in rel.parts if part.startswith("lambda_")), rel.parts[0])
         scene = next((part for part in rel.parts if part.startswith("rt")), rel.parts[1] if len(rel.parts) > 1 else "")
