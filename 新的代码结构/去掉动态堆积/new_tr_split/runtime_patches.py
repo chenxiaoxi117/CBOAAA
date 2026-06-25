@@ -145,6 +145,14 @@ def apply_cbo_stability_policy_override(groups):
     values = {
         "cbo_history_select_mode": _cbo_cli_option("--cbo-history-select-mode", "CBO_HISTORY_SELECT_MODE", "recent"),
         "cbo_context_k": _cbo_cli_option("--cbo-context-k", "CBO_CONTEXT_K", 50),
+        "cbo_context_min_rows": _cbo_cli_option("--cbo-context-min-rows", "CBO_CONTEXT_MIN_ROWS", 40),
+        "cbo_context_recent_keep": _cbo_cli_option("--cbo-context-recent-keep", "CBO_CONTEXT_RECENT_KEEP", 20),
+        "cbo_context_weak_fallback_k": _cbo_cli_option("--cbo-context-weak-fallback-k", "CBO_CONTEXT_WEAK_FALLBACK_K", 40),
+        "cbo_global_context_sim_threshold": _cbo_cli_option("--cbo-global-context-sim-threshold", "CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70),
+        "cbo_external_internal_sim_threshold": _cbo_cli_option("--cbo-external-sim-threshold", "CBO_EXTERNAL_INTERNAL_SIM_THRESHOLD", 0.75),
+        "cbo_external_internal_topk": _cbo_cli_option("--cbo-external-topk", "CBO_EXTERNAL_INTERNAL_TOPK", 400),
+        "cbo_external_internal_min_rows": _cbo_cli_option("--cbo-external-min-rows", "CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40),
+        "cbo_external_internal_recent_keep": _cbo_cli_option("--cbo-external-recent-keep", "CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20),
         "cbo_elite_k": _cbo_cli_option("--cbo-elite-k", "CBO_ELITE_K", 20),
         "cbo_diverse_k": _cbo_cli_option("--cbo-diverse-k", "CBO_DIVERSE_K", 20),
         "cbo_robust_score_mode": _cbo_cli_option("--cbo-robust-score-mode", "CBO_ROBUST_SCORE_MODE", "none"),
@@ -324,6 +332,14 @@ def method_history_policy_map(groups):
             "effective_history_mode": group_cfg.get("history_mode", _cfg_history_mode("all")),
             "effective_recent_window": group_cfg.get("recent_window", _cfg_recent_window()),
             "context_k": group_cfg.get("cbo_context_k", _cfg_cbo_int("CBO_CONTEXT_K", 50)),
+            "context_min_rows": group_cfg.get("cbo_context_min_rows", _cfg_cbo_int("CBO_CONTEXT_MIN_ROWS", 40)),
+            "context_recent_keep": group_cfg.get("cbo_context_recent_keep", _cfg_cbo_int("CBO_CONTEXT_RECENT_KEEP", 20)),
+            "context_weak_fallback_k": group_cfg.get("cbo_context_weak_fallback_k", _cfg_cbo_int("CBO_CONTEXT_WEAK_FALLBACK_K", 40)),
+            "global_context_sim_threshold": group_cfg.get("cbo_global_context_sim_threshold", _cfg_cbo_float("CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70)),
+            "external_internal_sim_threshold": group_cfg.get("cbo_external_internal_sim_threshold", _cfg_cbo_float("CBO_EXTERNAL_INTERNAL_SIM_THRESHOLD", 0.75)),
+            "external_internal_topk": group_cfg.get("cbo_external_internal_topk", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_TOPK", 400)),
+            "external_internal_min_rows": group_cfg.get("cbo_external_internal_min_rows", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40)),
+            "external_internal_recent_keep": group_cfg.get("cbo_external_internal_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20)),
             "elite_k": group_cfg.get("cbo_elite_k", _cfg_cbo_int("CBO_ELITE_K", 20)),
             "diverse_k": group_cfg.get("cbo_diverse_k", _cfg_cbo_int("CBO_DIVERSE_K", 20)),
             "robust_score_mode": group_cfg.get("cbo_robust_score_mode", _cfg_cbo_str("CBO_ROBUST_SCORE_MODE", "none")),
@@ -4023,6 +4039,14 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_robust_std_weight = float(group_cfg.get("cbo_robust_std_weight", _cfg_cbo_float("CBO_ROBUST_STD_WEIGHT", 0.5)))
     agent.cbo_theta_merge_eps = float(group_cfg.get("cbo_theta_merge_eps", _cfg_cbo_float("CBO_THETA_MERGE_EPS", 0.05)))
     agent.cbo_context_sim_threshold = float(group_cfg.get("cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+    agent.cbo_context_min_rows = int(group_cfg.get("cbo_context_min_rows", _cfg_cbo_int("CBO_CONTEXT_MIN_ROWS", 40)))
+    agent.cbo_context_recent_keep = int(group_cfg.get("cbo_context_recent_keep", _cfg_cbo_int("CBO_CONTEXT_RECENT_KEEP", 20)))
+    agent.cbo_context_weak_fallback_k = int(group_cfg.get("cbo_context_weak_fallback_k", _cfg_cbo_int("CBO_CONTEXT_WEAK_FALLBACK_K", 40)))
+    agent.cbo_global_context_sim_threshold = float(group_cfg.get("cbo_global_context_sim_threshold", _cfg_cbo_float("CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70)))
+    agent.cbo_external_internal_sim_threshold = float(group_cfg.get("cbo_external_internal_sim_threshold", _cfg_cbo_float("CBO_EXTERNAL_INTERNAL_SIM_THRESHOLD", 0.75)))
+    agent.cbo_external_internal_topk = int(group_cfg.get("cbo_external_internal_topk", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_TOPK", 400)))
+    agent.cbo_external_internal_min_rows = int(group_cfg.get("cbo_external_internal_min_rows", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40)))
+    agent.cbo_external_internal_recent_keep = int(group_cfg.get("cbo_external_internal_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20)))
     agent.cbo_external_gate_mode = str(group_cfg.get("cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) if agent.is_cbo_stability_enabled else "off").strip().lower()
     agent.cbo_external_gate_threshold = float(group_cfg.get("cbo_external_gate_threshold", _cfg_cbo_float("CBO_EXTERNAL_GATE_THRESHOLD", 0.35)))
     agent.cbo_external_gate_topk = int(group_cfg.get("cbo_external_gate_topk", _cfg_cbo_int("CBO_EXTERNAL_GATE_TOPK", 240)))
@@ -4983,7 +5007,7 @@ def _refactor_collect_samples(self, state=None):
     mode = str(getattr(self, "history_mode", _cfg_history_mode("all")) or "all").strip().lower()
     macro_mode = str(getattr(self, "cbo_macro_gate_mode", _cfg_cbo_str("CBO_MACRO_GATE_MODE", "off")) or "off").strip().lower()
     external_mode = str(getattr(self, "cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) or "off").strip().lower()
-    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel"} or macro_mode != "off" or external_mode not in {"off", "none", "disabled"}
+    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel", "global_context_threshold", "external_internal_threshold"} or macro_mode != "off" or external_mode not in {"off", "none", "disabled"}
     if mode in {"all", "legacy", "none"} and not selector_requires_pool:
         set_debug(records)
         return records
@@ -5138,6 +5162,252 @@ def _refactor_collect_samples(self, state=None):
             state_kernel_debug=state_debug,
         )
         return list(pool)
+
+    if select_mode == "external_internal_threshold":
+        all_records = _cbo_all_records(self)
+        current_external = getattr(self, "_active_external_context", None)
+        external_threshold = float(getattr(self, "cbo_external_internal_sim_threshold", _cfg_cbo_float("CBO_EXTERNAL_INTERNAL_SIM_THRESHOLD", 0.75)))
+        external_topk = max(1, int(getattr(self, "cbo_external_internal_topk", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_TOPK", 400))))
+        external_min_rows = max(1, int(getattr(self, "cbo_external_internal_min_rows", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40))))
+        internal_threshold = float(getattr(self, "cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+        if internal_threshold <= 0.0:
+            internal_threshold = float(getattr(self, "cbo_global_context_sim_threshold", _cfg_cbo_float("CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70)))
+        context_k = max(1, int(getattr(self, "cbo_context_k", _cfg_cbo_int("CBO_CONTEXT_K", 50))))
+        min_rows = max(2, int(getattr(self, "cbo_context_min_rows", _cfg_cbo_int("CBO_CONTEXT_MIN_ROWS", 40))))
+        recent_keep = max(0, int(getattr(self, "cbo_external_internal_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20))))
+        weak_fallback_k = max(0, int(getattr(self, "cbo_context_weak_fallback_k", _cfg_cbo_int("CBO_CONTEXT_WEAK_FALLBACK_K", 40))))
+
+        external_scored = []
+        for rec in all_records:
+            rec2 = dict(rec)
+            sim_ext = float(_cbo_external_similarity(self, current_external, rec2))
+            rec2["_cbo_external_similarity"] = sim_ext
+            external_scored.append((sim_ext, int(rec2.get("bo_iter", -1) or -1), rec2))
+        external_scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        external_passed = [r for sim, _, r in external_scored if sim >= external_threshold]
+        external_fallback_used = False
+        external_fallback_reason = ""
+        if current_external is None:
+            external_pool = [r for _, _, r in external_scored[:external_topk]]
+            external_fallback_used = True
+            external_fallback_reason = "missing_current_external_context"
+        elif len(external_passed) >= external_min_rows:
+            external_pool = external_passed[:external_topk]
+        else:
+            external_pool = [r for _, _, r in external_scored[:external_topk]]
+            external_fallback_used = True
+            external_fallback_reason = f"external_passed_{len(external_passed)}_lt_min_{external_min_rows}"
+
+        internal_scored = []
+        for rec in external_pool:
+            rec2 = dict(rec)
+            sim_int = float(_cbo_context_similarity(self, context, rec2))
+            rec2["_cbo_context_similarity"] = sim_int
+            internal_scored.append((sim_int, int(rec2.get("bo_iter", -1) or -1), rec2))
+        internal_scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        strong_records = [r for sim, _, r in internal_scored if sim >= internal_threshold][:context_k]
+        weak_candidates = [r for sim, _, r in internal_scored if sim < internal_threshold]
+
+        recent_records = []
+        if recent_keep > 0:
+            for rec in [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_keep:]]:
+                rec2 = dict(rec)
+                rec2["_cbo_external_similarity"] = float(_cbo_external_similarity(self, current_external, rec2))
+                rec2["_cbo_context_similarity"] = float(_cbo_context_similarity(self, context, rec2))
+                recent_records.append(rec2)
+            recent_records.sort(key=lambda r: int(r.get("bo_iter", -1) or -1), reverse=True)
+
+        merged = []
+        selected_ids = set()
+
+        def add_block(priority, block, limit=None):
+            added = 0
+            for rec in block:
+                if limit is not None and added >= int(limit):
+                    break
+                key = _cbo_record_identity(self, rec)
+                if key in selected_ids:
+                    continue
+                rec = dict(rec)
+                rec["_cbo_select_priority"] = int(priority)
+                rec["_cbo_external_similarity"] = float(rec.get("_cbo_external_similarity", _cbo_external_similarity(self, current_external, rec)))
+                rec["_cbo_context_similarity"] = float(rec.get("_cbo_context_similarity", _cbo_context_similarity(self, context, rec)))
+                merged.append(rec)
+                selected_ids.add(key)
+                added += 1
+            return added
+
+        strong_added = add_block(0, strong_records)
+        needed = max(0, min_rows - len(merged))
+        weak_added = add_block(1, weak_candidates, limit=min(weak_fallback_k, needed))
+        needed = max(0, min_rows - len(merged))
+        recent_added = add_block(2, recent_records, limit=needed if needed > 0 else 0)
+
+        final_fallback_added = 0
+        if len(merged) < min_rows:
+            recent_tail = []
+            for rec in [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_window:]]:
+                rec2 = dict(rec)
+                rec2["_cbo_external_similarity"] = float(_cbo_external_similarity(self, current_external, rec2))
+                rec2["_cbo_context_similarity"] = float(_cbo_context_similarity(self, context, rec2))
+                recent_tail.append(rec2)
+            final_fallback_added = add_block(3, list(reversed(recent_tail)), limit=min_rows - len(merged))
+
+        merged.sort(key=lambda r: (
+            int(r.get("_cbo_select_priority", 9)),
+            -float(np.nan_to_num(r.get("_cbo_external_similarity", 0.0), nan=0.0)),
+            -float(np.nan_to_num(r.get("_cbo_context_similarity", 0.0), nan=0.0)),
+            -int(r.get("bo_iter", -1) or -1),
+        ))
+        external_sims = [float(s) for s, _, _ in external_scored]
+        external_pool_sims = [float(r.get("_cbo_external_similarity", np.nan)) for r in external_pool if np.isfinite(float(r.get("_cbo_external_similarity", np.nan)))]
+        internal_sims = [float(s) for s, _, _ in internal_scored]
+        selected_external_sims = [float(r.get("_cbo_external_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_external_similarity", np.nan)))]
+        selected_internal_sims = [float(r.get("_cbo_context_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_context_similarity", np.nan)))]
+        threshold_debug = {
+            "external_internal_threshold_enabled": True,
+            "external_internal_external_threshold": float(external_threshold),
+            "external_internal_internal_threshold": float(internal_threshold),
+            "external_internal_external_topk": int(external_topk),
+            "external_internal_context_k": int(context_k),
+            "external_internal_min_rows": int(min_rows),
+            "external_internal_external_min_rows": int(external_min_rows),
+            "external_internal_recent_keep": int(recent_keep),
+            "external_internal_weak_fallback_k": int(weak_fallback_k),
+            "external_internal_raw_records": int(len(all_records)),
+            "external_internal_external_passed_count": int(len(external_passed)),
+            "external_internal_external_pool_count": int(len(external_pool)),
+            "external_internal_internal_scored_count": int(len(internal_scored)),
+            "external_internal_internal_strong_count": int(sum(1 for sim, _, _ in internal_scored if sim >= internal_threshold)),
+            "external_internal_internal_weak_count": int(sum(1 for sim, _, _ in internal_scored if sim < internal_threshold)),
+            "external_internal_selected_strong_count": int(strong_added),
+            "external_internal_selected_weak_count": int(weak_added),
+            "external_internal_selected_recent_count": int(recent_added),
+            "external_internal_final_fallback_count": int(final_fallback_added),
+            "external_internal_fallback_used": bool(external_fallback_used or weak_added > 0 or recent_added > 0 or final_fallback_added > 0),
+            "external_internal_external_fallback_used": bool(external_fallback_used),
+            "external_internal_external_fallback_reason": str(external_fallback_reason),
+            "external_internal_external_similarity_max": float(np.nanmax(external_sims)) if external_sims else np.nan,
+            "external_internal_external_similarity_mean": float(np.nanmean(external_sims)) if external_sims else np.nan,
+            "external_internal_external_similarity_p50": float(np.nanpercentile(external_sims, 50)) if external_sims else np.nan,
+            "external_internal_external_pool_similarity_mean": float(np.nanmean(external_pool_sims)) if external_pool_sims else np.nan,
+            "external_internal_external_pool_similarity_min": float(np.nanmin(external_pool_sims)) if external_pool_sims else np.nan,
+            "external_internal_internal_similarity_max": float(np.nanmax(internal_sims)) if internal_sims else np.nan,
+            "external_internal_internal_similarity_mean": float(np.nanmean(internal_sims)) if internal_sims else np.nan,
+            "external_internal_internal_similarity_p50": float(np.nanpercentile(internal_sims, 50)) if internal_sims else np.nan,
+            "external_internal_selected_external_similarity_mean": float(np.nanmean(selected_external_sims)) if selected_external_sims else np.nan,
+            "external_internal_selected_external_similarity_min": float(np.nanmin(selected_external_sims)) if selected_external_sims else np.nan,
+            "external_internal_selected_internal_similarity_mean": float(np.nanmean(selected_internal_sims)) if selected_internal_sims else np.nan,
+            "external_internal_selected_internal_similarity_min": float(np.nanmin(selected_internal_sims)) if selected_internal_sims else np.nan,
+            "external_internal_selected_phase_counts": _cbo_phase_counts_string(merged),
+        }
+        set_debug(
+            merged,
+            recent_count=recent_added,
+            context_count=strong_added,
+            sims=internal_sims,
+            context_selection_source_pool="external_internal_threshold",
+            elite_selection_source_pool="external_internal_threshold",
+            tr_anchor_source_pool="external_internal_threshold",
+            state_kernel_debug=threshold_debug,
+        )
+        return list(merged)
+
+    if select_mode == "global_context_threshold":
+        all_records = _cbo_external_gate_records(self, _cbo_all_records(self), recent_window=recent_window, min_keep=min_keep)
+        threshold = float(getattr(self, "cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+        if threshold <= 0.0:
+            threshold = float(getattr(self, "cbo_global_context_sim_threshold", _cfg_cbo_float("CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70)))
+        context_k = max(1, int(getattr(self, "cbo_context_k", _cfg_cbo_int("CBO_CONTEXT_K", 50))))
+        min_rows = max(2, int(getattr(self, "cbo_context_min_rows", _cfg_cbo_int("CBO_CONTEXT_MIN_ROWS", 40))))
+        recent_keep = max(0, int(getattr(self, "cbo_context_recent_keep", _cfg_cbo_int("CBO_CONTEXT_RECENT_KEEP", 20))))
+        weak_fallback_k = max(0, int(getattr(self, "cbo_context_weak_fallback_k", _cfg_cbo_int("CBO_CONTEXT_WEAK_FALLBACK_K", 40))))
+
+        scored = []
+        for rec in all_records:
+            rec2 = dict(rec)
+            sim = float(_cbo_context_similarity(self, context, rec2))
+            rec2["_cbo_context_similarity"] = sim
+            scored.append((sim, rec2))
+        scored.sort(key=lambda x: (x[0], int(x[1].get("bo_iter", -1) or -1)), reverse=True)
+
+        strong_records = [r for sim, r in scored if sim >= threshold][:context_k]
+        weak_candidates = [r for sim, r in scored if sim < threshold]
+        recent_records = []
+        if recent_keep > 0:
+            recent_records = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_keep:]]
+            recent_records = _cbo_external_gate_records(self, recent_records, recent_window=recent_keep, min_keep=0) if recent_records else []
+            recent_records = [dict(r, _cbo_context_similarity=float(_cbo_context_similarity(self, context, r))) for r in recent_records]
+
+        merged = []
+        selected_ids = set()
+
+        def add_block(priority, block, limit=None):
+            added = 0
+            for rec in block:
+                if limit is not None and added >= int(limit):
+                    break
+                key = _cbo_record_identity(self, rec)
+                if key in selected_ids:
+                    continue
+                rec = dict(rec)
+                rec["_cbo_select_priority"] = int(priority)
+                rec["_cbo_context_similarity"] = float(rec.get("_cbo_context_similarity", _cbo_context_similarity(self, context, rec)))
+                merged.append(rec)
+                selected_ids.add(key)
+                added += 1
+            return added
+
+        strong_added = add_block(0, strong_records)
+        recent_added = add_block(1, sorted(recent_records, key=lambda r: int(r.get("bo_iter", -1) or -1), reverse=True))
+        needed = max(0, min_rows - len(merged))
+        weak_limit = min(weak_fallback_k, needed)
+        weak_added = add_block(2, weak_candidates, limit=weak_limit)
+
+        # If the archive is still too small during cold start, keep the most recent
+        # available records as a final numerical fallback for GP fitting.
+        final_fallback_added = 0
+        if len(merged) < min_rows:
+            recent_tail = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_window:]]
+            final_fallback_added = add_block(3, list(reversed(recent_tail)), limit=min_rows - len(merged))
+
+        merged.sort(key=lambda r: (int(r.get("_cbo_select_priority", 9)), -float(r.get("_cbo_context_similarity", 0.0)), -int(r.get("bo_iter", -1) or -1)))
+        sims = [float(s) for s, _ in scored]
+        selected_sims = [float(r.get("_cbo_context_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_context_similarity", np.nan)))]
+        threshold_debug = {
+            "global_context_threshold_enabled": True,
+            "global_context_threshold": float(threshold),
+            "global_context_raw_records": int(len(all_records)),
+            "global_context_scored_count": int(len(scored)),
+            "global_context_strong_count": int(sum(1 for sim, _ in scored if sim >= threshold)),
+            "global_context_weak_count": int(sum(1 for sim, _ in scored if sim < threshold)),
+            "global_context_selected_strong_count": int(strong_added),
+            "global_context_selected_recent_count": int(recent_added),
+            "global_context_selected_weak_count": int(weak_added),
+            "global_context_final_fallback_count": int(final_fallback_added),
+            "global_context_min_rows": int(min_rows),
+            "global_context_recent_keep": int(recent_keep),
+            "global_context_weak_fallback_k": int(weak_fallback_k),
+            "global_context_fallback_used": bool(weak_added > 0 or final_fallback_added > 0),
+            "global_context_similarity_max": float(np.nanmax(sims)) if sims else np.nan,
+            "global_context_similarity_mean": float(np.nanmean(sims)) if sims else np.nan,
+            "global_context_similarity_p50": float(np.nanpercentile(sims, 50)) if sims else np.nan,
+            "global_context_selected_similarity_mean": float(np.nanmean(selected_sims)) if selected_sims else np.nan,
+            "global_context_selected_similarity_min": float(np.nanmin(selected_sims)) if selected_sims else np.nan,
+            "global_context_selected_similarity_max": float(np.nanmax(selected_sims)) if selected_sims else np.nan,
+            "global_context_selected_phase_counts": _cbo_phase_counts_string(merged),
+        }
+        set_debug(
+            merged,
+            recent_count=recent_added,
+            context_count=strong_added,
+            sims=sims,
+            context_selection_source_pool="global_context_threshold",
+            elite_selection_source_pool="global_context_threshold",
+            tr_anchor_source_pool="global_context_threshold",
+            state_kernel_debug=threshold_debug,
+        )
+        return list(merged)
 
     if select_mode in {"recent_context", "recent_context_elite", "hybrid"} or macro_mode != "off":
         recent = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-recent_window:]]
@@ -6999,6 +7269,14 @@ def run_scenario_group(seed, group_key, group_cfg):
             f"history_mode={group_cfg.get('history_mode', _cfg_history_mode())} "
             f"recent_window={group_cfg.get('recent_window', _cfg_recent_window())} "
             f"context_k={group_cfg.get('cbo_context_k', _cfg_cbo_int('CBO_CONTEXT_K', 50))} "
+            f"context_min_rows={group_cfg.get('cbo_context_min_rows', _cfg_cbo_int('CBO_CONTEXT_MIN_ROWS', 40))} "
+            f"context_recent_keep={group_cfg.get('cbo_context_recent_keep', _cfg_cbo_int('CBO_CONTEXT_RECENT_KEEP', 20))} "
+            f"context_weak_fallback_k={group_cfg.get('cbo_context_weak_fallback_k', _cfg_cbo_int('CBO_CONTEXT_WEAK_FALLBACK_K', 40))} "
+            f"global_context_threshold={group_cfg.get('cbo_global_context_sim_threshold', _cfg_cbo_float('CBO_GLOBAL_CONTEXT_SIM_THRESHOLD', 0.70))} "
+            f"external_internal_threshold={group_cfg.get('cbo_external_internal_sim_threshold', _cfg_cbo_float('CBO_EXTERNAL_INTERNAL_SIM_THRESHOLD', 0.75))} "
+            f"external_internal_topk={group_cfg.get('cbo_external_internal_topk', _cfg_cbo_int('CBO_EXTERNAL_INTERNAL_TOPK', 400))} "
+            f"external_internal_min_rows={group_cfg.get('cbo_external_internal_min_rows', _cfg_cbo_int('CBO_EXTERNAL_INTERNAL_MIN_ROWS', 40))} "
+            f"external_internal_recent_keep={group_cfg.get('cbo_external_internal_recent_keep', _cfg_cbo_int('CBO_EXTERNAL_INTERNAL_RECENT_KEEP', 20))} "
             f"elite_k={group_cfg.get('cbo_elite_k', _cfg_cbo_int('CBO_ELITE_K', 20))} "
             f"diverse_k={group_cfg.get('cbo_diverse_k', _cfg_cbo_int('CBO_DIVERSE_K', 20))} "
             f"robust_score_mode={group_cfg.get('cbo_robust_score_mode', _cfg_cbo_str('CBO_ROBUST_SCORE_MODE', 'none'))} "
