@@ -46,6 +46,114 @@ def build_scenario_method_groups():
             "anchor_points": [anchor_balanced, anchor_rt, anchor_energy],
         }
 
+    def v32_transfer_group(label, sigma_acquisition_mode):
+        """V31 selector with a learned common noise plus transfer-only extras."""
+        return {
+            "label": str(label),
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 0,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 80,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_history_relabel_to_active_reference": True,
+            "cbo_novel_global_fallback": False,
+            "cbo_unrelated_global_fallback": False,
+            "cbo_phase_similar_fill_target": True,
+            "cbo_exact_use_similar_fallback": False,
+            "cbo_adaptive_use_weighted_phase_samples": True,
+            "cbo_transfer_noise_enabled": True,
+            "cbo_transfer_noise_learn_base": True,
+            "cbo_transfer_weight_min": 0.20,
+            "cbo_transfer_weight_max": 0.90,
+            "cbo_transfer_noise_floor": 0.001,
+            "cbo_transfer_noise_scale": 0.35,
+            "cbo_relation_sample_targets_enabled": True,
+            "cbo_exact_sample_target": 80,
+            "cbo_similar_sample_target": 45,
+            "cbo_novel_sample_target": 80,
+            "cbo_phase_reference_probe_rounds": 5,
+            "cbo_prediction_error_reexplore": False,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": str(sigma_acquisition_mode),
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(
+                use_context=True,
+                use_trust_region=False,
+                anchor_mode="fixed5",
+                context_mode="internal_pressure4",
+            ),
+        }
+
+    def v33_safe_similar_transfer_group(label):
+        """V32 with bounded, state-gated similar-scene transfer."""
+        group = v32_transfer_group(label, "adaptive")
+        group.update({
+            # Similar history is a 45-row cold-start bridge, not an 80-row
+            # substitute for observations from the active phase.
+            "cbo_similar_training_target_enabled": True,
+            "cbo_similar_training_target": 45,
+            "cbo_similar_internal_hard_gate": True,
+            "cbo_similar_internal_hard_threshold": 0.70,
+            # Preserve transfer reliability after the shared base noise is
+            # learned on the standardized response scale.
+            "cbo_transfer_noise_weight_ratio": True,
+            "cbo_transfer_noise_ratio_scale": 0.75,
+            "cbo_transfer_noise_ratio_cap": 0.80,
+            # React only during the vulnerable beginning of a phase.
+            "cbo_prediction_error_reexplore": True,
+            "cbo_prediction_error_reexplore_phase_max_iter": 50,
+        })
+        return group
+
+    def v34_similar_gate_sweep_group(label, hard_threshold):
+        """V32 with an internal hard gate while retaining the 80-row budget.
+
+        These variants isolate the gate threshold from V33's separate 45-row
+        total-training cap.  Transfer weighting/noise otherwise stays at V32.
+        """
+        group = v32_transfer_group(label, "adaptive")
+        group.update({
+            "cbo_similar_training_target_enabled": False,
+            "cbo_similar_training_target": 45,
+            "cbo_similar_internal_hard_gate": True,
+            "cbo_similar_internal_hard_threshold": float(hard_threshold),
+        })
+        return group
+
+    def v35_recent_first_similar_group(label):
+        """Use recent relation-qualified history for adjacent similar phases."""
+        group = v32_transfer_group(label, "adaptive")
+        group.update({
+            "cbo_similar_training_target_enabled": False,
+            "cbo_similar_internal_hard_gate": False,
+            "cbo_similar_prefer_recent": True,
+        })
+        return group
+
+    def v36_adjacent_full_trust_group(label):
+        """V35 plus full trust for immediately preceding similar history."""
+        group = v35_recent_first_similar_group(label)
+        group.update({
+            "cbo_adjacent_similar_full_trust": True,
+        })
+        return group
+
     def context_agent_kwargs(use_trust_region=False):
         return {
             "dim": CFG.DIM_THETA,
@@ -273,6 +381,35 @@ def build_scenario_method_groups():
             "cbo_sigma_floor": 0.03,
             "agent_kwargs": reduced7_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="fixed5"),
         },
+        "reduced7_bo_adaptive_all_history": {
+            "label": "Reduced7 BO-Adaptive All-History Global Energy",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_bo_adaptive",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_sigma_calibration": "off",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "cbo_adaptive_exploration_beta_max": 3.0,
+            "cbo_adaptive_exploration_eta_max": 0.25,
+            "cbo_adaptive_exploration_window": 30,
+            "cbo_adaptive_exploration_sample_target": 80,
+            "cbo_adaptive_exploration_smoothing": 0.20,
+            "cbo_adaptive_exploration_progress_pct": 0.01,
+            "cbo_adaptive_exploration_reexplore_gain": 0.25,
+            "cbo_adaptive_exploration_plausible_margin_mult": 2.0,
+            "cbo_adaptive_exploration_backlog_ref": 1.0,
+            "cbo_adaptive_exploration_unfinished_ref": 0.10,
+            "cbo_adaptive_exploration_trend_ref": 0.05,
+            "cbo_adaptive_exploration_max_util_start": 0.80,
+            "cbo_sigma_scale_default": 4.0,
+            "cbo_sigma_scale_min": 1.0,
+            "cbo_sigma_scale_max": 6.0,
+            "cbo_sigma_floor": 0.03,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=False, use_trust_region=False, anchor_mode="fixed5"),
+        },
         "reduced7_cbo_lite_pressure_taskmix_counts": {
             "label": "Reduced7 CBO-Lite ExternalTaskMix+Internal6 Global Energy",
             "norm_mode": "fixed",
@@ -281,6 +418,32 @@ def build_scenario_method_groups():
             "method_family": "reduced7_global_energy_cbo",
             "context_mode": "internal_pressure6",
             "history_mode": "recent_confidence",
+            "recent_window": 80,
+            "confidence_min": 0.35,
+            "confidence_min_samples": 12,
+            "cbo_external_gate_mode": "taskmix_intensity",
+            "cbo_external_gate_threshold": 0.35,
+            "cbo_external_gate_topk": 240,
+            "cbo_external_gate_min_samples": 12,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_buffer_size": 50,
+            "cbo_sigma_calibration_min_samples": 10,
+            "cbo_sigma_calibration_use_in_acq": "false",
+            "cbo_sigma_calibration_eta": 0.25,
+            "cbo_sigma_scale_default": 4.0,
+            "cbo_sigma_scale_min": 1.0,
+            "cbo_sigma_scale_max": 6.0,
+            "cbo_sigma_floor": 0.03,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure6"),
+        },
+        "reduced7_cbo_lite_pressure_taskmix_counts_all_history": {
+            "label": "Reduced7 CBO-Lite ExternalTaskMix+Internal6 All-History Global Energy",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure6",
+            "history_mode": "all",
             "recent_window": 80,
             "confidence_min": 0.35,
             "confidence_min_samples": 12,
@@ -379,6 +542,418 @@ def build_scenario_method_groups():
             "cbo_sigma_floor": 0.03,
             "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
         },
+        "reduced7_cbo_lite_internal4_context_threshold": {
+            "label": "Reduced7 CBO-Lite Internal4 Fixed External/Internal Threshold",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "external_internal_threshold",
+            "cbo_external_internal_sim_threshold": 0.70,
+            "cbo_external_internal_topk": 400,
+            "cbo_external_internal_min_rows": 40,
+            "cbo_external_internal_recent_keep": 20,
+            "cbo_context_k": 200,
+            "cbo_context_min_rows": 40,
+            "cbo_context_weak_fallback_k": 40,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_intensity_max_diff": -1.0,
+            "cbo_external_lengthscale_intensity": 0.75,
+            "cbo_external_lengthscale_taskmix": 0.25,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_lite_internal4_context_decay": {
+            "label": "Reduced7 CBO-Lite Internal4 Decaying Similar-History Reuse",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "external_internal_decay",
+            "cbo_external_internal_sim_threshold": 0.70,
+            "cbo_external_internal_topk": 400,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_history_target_rows": 80,
+            "cbo_history_similar_keep": 16,
+            "cbo_history_global_keep": 4,
+            "cbo_history_global_max": 20,
+            "cbo_external_intensity_max_diff": 0.50,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_recent80": {
+            "label": "Reduced7 CBO Internal4 Recent80",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "recent",
+            "recent_window": 80,
+            "cbo_history_select_mode": "recent",
+            "cbo_external_gate_mode": "off",
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_recent80_mean_only": {
+            "label": "Reduced7 CBO Internal4 Recent80 Posterior Mean Only",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "recent",
+            "recent_window": 80,
+            "cbo_history_select_mode": "recent",
+            "cbo_external_gate_mode": "off",
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "false",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_all_history": {
+            "label": "Reduced7 CBO Internal4 All-History",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "recent",
+            "cbo_external_gate_mode": "off",
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_phase_adaptive_reuse": {
+            "label": "Reduced7 CBO Internal4 Phase-Adaptive Reuse",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_adaptive_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 10,
+            "cbo_phase_component_sim_threshold": 0.70,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_prediction_error_reexplore": True,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_phase_hierarchical_reuse": {
+            "label": "Reduced7 CBO Internal4 Hierarchical Phase Reuse",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 10,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 40,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_prediction_error_reexplore": True,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_phase_hierarchical_no_reexplore": {
+            "label": "Reduced7 CBO Internal4 Hierarchical Reuse No Reexplore",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 10,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 40,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_prediction_error_reexplore": False,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_phase_hierarchical_phase20_reexplore": {
+            "label": "Reduced7 CBO Internal4 Hierarchical Reuse Phase20 Reexplore",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 10,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 40,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_prediction_error_reexplore": True,
+            "cbo_prediction_error_reexplore_phase_max_iter": 20,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_reference_aligned_no_reexplore": {
+            "label": "Reduced7 CBO Internal4 Reference-Aligned No Reexplore",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 10,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 40,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_history_relabel_to_active_reference": True,
+            "cbo_novel_global_fallback": False,
+            "cbo_unrelated_global_fallback": False,
+            "cbo_adaptive_use_weighted_phase_samples": True,
+            "cbo_similar_history_sample_weight": 0.50,
+            "cbo_phase_reference_probe_rounds": 5,
+            "cbo_prediction_error_reexplore": False,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_reference_aligned_relation_reexplore": {
+            "label": "Reduced7 CBO Internal4 Reference-Aligned Relation Reexplore",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 10,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 40,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_history_relabel_to_active_reference": True,
+            "cbo_novel_global_fallback": False,
+            "cbo_unrelated_global_fallback": False,
+            "cbo_adaptive_use_weighted_phase_samples": True,
+            "cbo_similar_history_sample_weight": 0.50,
+            "cbo_phase_reference_probe_rounds": 5,
+            "cbo_prediction_error_reexplore": True,
+            "cbo_prediction_error_reexplore_phase_max_iter": 20,
+            "cbo_relation_aware_reexplore": True,
+            "cbo_reexplore_relations": "similar,novel",
+            "cbo_reexplore_consecutive_required": 2,
+            "cbo_reexplore_max_triggers_per_phase": 1,
+            "cbo_reexplore_no_renew_during_countdown": True,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_transfer_weighted_no_reexplore": {
+            "label": "Reduced7 CBO Internal4 Transfer-Weighted No Reexplore",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 0,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 80,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_history_relabel_to_active_reference": True,
+            "cbo_novel_global_fallback": False,
+            "cbo_unrelated_global_fallback": False,
+            "cbo_phase_similar_fill_target": True,
+            "cbo_exact_use_similar_fallback": False,
+            "cbo_adaptive_use_weighted_phase_samples": True,
+            "cbo_transfer_noise_enabled": True,
+            "cbo_transfer_weight_min": 0.20,
+            "cbo_transfer_weight_max": 0.90,
+            "cbo_transfer_noise_floor": 0.02,
+            "cbo_transfer_noise_scale": 0.35,
+            "cbo_relation_sample_targets_enabled": True,
+            "cbo_exact_sample_target": 80,
+            "cbo_similar_sample_target": 45,
+            "cbo_novel_sample_target": 80,
+            "cbo_phase_reference_probe_rounds": 5,
+            "cbo_prediction_error_reexplore": False,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_transfer_weighted_relation_reexplore": {
+            "label": "Reduced7 CBO Internal4 Transfer-Weighted Relation Reexplore",
+            "norm_mode": "fixed",
+            "control_mode": "reduced7",
+            "deploy_policy": "greedy",
+            "method_family": "reduced7_global_energy_cbo",
+            "context_mode": "internal_pressure4",
+            "history_mode": "all",
+            "recent_window": 80,
+            "cbo_history_select_mode": "phase_hierarchical_reuse",
+            "cbo_history_target_rows": 80,
+            "cbo_phase_memory_keep": 0,
+            "cbo_phase_taskmix_min_sim": 0.70,
+            "cbo_phase_overall_sim_threshold": 0.65,
+            "cbo_phase_taskmix_weight": 0.75,
+            "cbo_phase_similar_initial_cap": 80,
+            "cbo_phase_similar_decay_end": 80,
+            "cbo_phase_archive_per_scene": 80,
+            "cbo_phase_exact_intensity_tol": 0.10,
+            "cbo_phase_exact_taskmix_l1_tol": 0.06,
+            "cbo_context_sim_threshold": 0.70,
+            "cbo_external_lengthscale_intensity": 0.50,
+            "cbo_external_lengthscale_taskmix": 0.35,
+            "cbo_history_relabel_to_active_reference": True,
+            "cbo_novel_global_fallback": False,
+            "cbo_unrelated_global_fallback": False,
+            "cbo_phase_similar_fill_target": True,
+            "cbo_exact_use_similar_fallback": False,
+            "cbo_adaptive_use_weighted_phase_samples": True,
+            "cbo_transfer_noise_enabled": True,
+            "cbo_transfer_weight_min": 0.20,
+            "cbo_transfer_weight_max": 0.90,
+            "cbo_transfer_noise_floor": 0.02,
+            "cbo_transfer_noise_scale": 0.35,
+            "cbo_relation_sample_targets_enabled": True,
+            "cbo_exact_sample_target": 80,
+            "cbo_similar_sample_target": 45,
+            "cbo_novel_sample_target": 80,
+            "cbo_phase_reference_probe_rounds": 5,
+            "cbo_prediction_error_reexplore": True,
+            "cbo_prediction_error_reexplore_phase_max_iter": 20,
+            "cbo_relation_aware_reexplore": True,
+            "cbo_reexplore_relations": "similar,novel",
+            "cbo_reexplore_consecutive_required": 2,
+            "cbo_reexplore_max_triggers_per_phase": 1,
+            "cbo_reexplore_no_renew_during_countdown": True,
+            "cbo_sigma_calibration": "on",
+            "cbo_sigma_calibration_use_in_acq": "adaptive",
+            "cbo_sigma_calibration_eta": 0.25,
+            "agent_kwargs": reduced7_agent_kwargs(use_context=True, use_trust_region=False, anchor_mode="fixed5", context_mode="internal_pressure4"),
+        },
+        "reduced7_cbo_internal4_transfer_learned_noise": v32_transfer_group(
+            "Reduced7 CBO Internal4 Transfer Learned-Base Noise",
+            "adaptive",
+        ),
+        "reduced7_cbo_internal4_transfer_v33_safe_similar": v33_safe_similar_transfer_group(
+            "Reduced7 CBO Internal4 V33 Safe Similar Transfer",
+        ),
+        "reduced7_cbo_internal4_transfer_v34_gate030": v34_similar_gate_sweep_group(
+            "Reduced7 CBO Internal4 V34 Gate 0.30 Fill80", 0.30,
+        ),
+        "reduced7_cbo_internal4_transfer_v34_gate045": v34_similar_gate_sweep_group(
+            "Reduced7 CBO Internal4 V34 Gate 0.45 Fill80", 0.45,
+        ),
+        "reduced7_cbo_internal4_transfer_v34_gate060": v34_similar_gate_sweep_group(
+            "Reduced7 CBO Internal4 V34 Gate 0.60 Fill80", 0.60,
+        ),
+        "reduced7_cbo_internal4_transfer_v34_gate070": v34_similar_gate_sweep_group(
+            "Reduced7 CBO Internal4 V34 Gate 0.70 Fill80", 0.70,
+        ),
+        "reduced7_cbo_internal4_transfer_v35_recent_first": v35_recent_first_similar_group(
+            "Reduced7 CBO Internal4 V35 Recent-First Similar Transfer",
+        ),
+        "reduced7_cbo_internal4_transfer_v36_adjacent_full_trust": v36_adjacent_full_trust_group(
+            "Reduced7 CBO Internal4 V36 Adjacent Similar Full Trust",
+        ),
+        "reduced7_cbo_internal4_transfer_learned_noise_mean_only": v32_transfer_group(
+            "Reduced7 CBO Internal4 Transfer Learned-Base Noise Posterior Mean Only",
+            "false",
+        ),
         "reduced9_fixed_mid": {
             "label": "Reduced9 Fixed Mid Task Energy",
             "norm_mode": "fixed",
@@ -1411,6 +1986,22 @@ def _reference_from_log_at(log, idx, source_key):
     macro_vals = log.get("macro_context_key", []) if isinstance(log, dict) else []
     sig = str(sig_vals[idx]) if idx < len(sig_vals) and sig_vals[idx] not in (None, "") else ""
     macro = str(macro_vals[idx]) if idx < len(macro_vals) and macro_vals[idx] not in (None, "") else ""
+    lam_vals = log.get("dynamic_phase_lambda", []) if isinstance(log, dict) else []
+    rt_vals = log.get("dynamic_phase_rt_prob", []) if isinstance(log, dict) else []
+    batch_vals = log.get("dynamic_phase_batch_prob", []) if isinstance(log, dict) else []
+    ai_vals = log.get("dynamic_phase_ai_prob", []) if isinstance(log, dict) else []
+    if all(idx < len(vals) for vals in [lam_vals, rt_vals, batch_vals, ai_vals]):
+        try:
+            lam = float(lam_vals[idx])
+            rt = float(rt_vals[idx])
+            batch = float(batch_vals[idx])
+            ai = float(ai_vals[idx])
+            macro = (
+                f"lambda_{lam:.6g}_mix_{int(round(rt * 100))}_"
+                f"{int(round(batch * 100))}_{int(round(ai * 100))}"
+            )
+        except Exception:
+            pass
     if not sig:
         phase = _current_static_reference_phase()
         sig = str(phase.get("phase_signature", phase.get("signature", "")))
@@ -1554,21 +2145,64 @@ def _phase_signature_from_descriptor(desc):
     )
 
 
+def _phase_reference_exact_match(desc, ref_desc):
+    if not isinstance(desc, dict) or not isinstance(ref_desc, dict):
+        return False
+    for key in ["resource_perturbation_id", "link_profile_id", "task_adaptation_enabled"]:
+        if desc.get(key) != ref_desc.get(key):
+            return False
+    lam_diff = abs(_phase_safe_float(desc.get("lambda"), 0.0) - _phase_safe_float(ref_desc.get("lambda"), 0.0))
+    if lam_diff > float(getattr(CFG, "CBO_PHASE_EXACT_INTENSITY_TOL", getattr(CFG, "DEFAULT_CBO_PHASE_EXACT_INTENSITY_TOL", 0.10))):
+        return False
+    mix = desc.get("task_mix", {}) or {}
+    ref_mix = ref_desc.get("task_mix", {}) or {}
+    mix_l1 = sum(abs(_phase_safe_float(mix.get(t), 0.0) - _phase_safe_float(ref_mix.get(t), 0.0)) for t in ["RT", "Batch", "AI"])
+    return mix_l1 <= float(getattr(CFG, "CBO_PHASE_EXACT_TASKMIX_L1_TOL", getattr(CFG, "DEFAULT_CBO_PHASE_EXACT_TASKMIX_L1_TOL", 0.06)))
+
+
+def _phase_reference_similarity(desc, ref_desc):
+    if not isinstance(desc, dict) or not isinstance(ref_desc, dict):
+        return {"intensity": 0.0, "taskmix": 0.0, "overall": 0.0}
+    lam_ls = max(1e-12, float(getattr(CFG, "CBO_EXTERNAL_LENGTHSCALE_INTENSITY", getattr(CFG, "DEFAULT_CBO_EXTERNAL_LENGTHSCALE_INTENSITY", 0.50))))
+    mix_ls = max(1e-12, float(getattr(CFG, "CBO_EXTERNAL_LENGTHSCALE_TASKMIX", getattr(CFG, "DEFAULT_CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.35))))
+    lam_dist = (_phase_safe_float(desc.get("lambda"), 0.0) - _phase_safe_float(ref_desc.get("lambda"), 0.0)) / lam_ls
+    mix = desc.get("task_mix", {}) or {}
+    ref_mix = ref_desc.get("task_mix", {}) or {}
+    mix_sq = sum(((_phase_safe_float(mix.get(t), 0.0) - _phase_safe_float(ref_mix.get(t), 0.0)) / mix_ls) ** 2 for t in ["RT", "Batch", "AI"])
+    sim_int = float(np.exp(-0.5 * lam_dist ** 2))
+    sim_mix = float(np.exp(-0.5 * mix_sq))
+    weight = float(np.clip(getattr(CFG, "CBO_PHASE_TASKMIX_WEIGHT", getattr(CFG, "DEFAULT_CBO_PHASE_TASKMIX_WEIGHT", 0.75)), 0.0, 1.0))
+    overall = float(max(sim_mix, 1e-12) ** weight * max(sim_int, 1e-12) ** (1.0 - weight))
+    return {"intensity": sim_int, "taskmix": sim_mix, "overall": overall}
+
+
 def assign_phase_reference_signatures(phases):
-    """Assign reference signatures; similar external scenes reuse one signature."""
+    """Assign reference signatures under the configured cache reuse policy."""
     representatives = []
     out = []
+    reuse_mode = str(getattr(CFG, "PHASE_REFERENCE_REUSE_MODE", "significant_external") or "significant_external").strip().lower()
     for phase in list(phases or []):
         ph = dict(phase)
         desc = _phase_external_descriptor(ph.get("lambda", 0.0), ph.get("task_probs", {}))
         chosen = None
         reason = "new_reference_scene"
         for rep in representatives:
-            changed, why = _phase_significant_change(desc, rep["descriptor"])
-            if not changed:
+            if reuse_mode == "exact_only":
+                matched = _phase_reference_exact_match(desc, rep["descriptor"])
+                why = "exact_external_reference_reuse" if matched else "non_exact_external_scene"
+            else:
+                changed, why = _phase_significant_change(desc, rep["descriptor"])
+                matched = not changed
+            if matched:
                 chosen = rep
                 reason = why
                 break
+        candidate = None
+        candidate_parts = {"intensity": 0.0, "taskmix": 0.0, "overall": 0.0}
+        if chosen is None and representatives:
+            ranked = [(_phase_reference_similarity(desc, rep["descriptor"]), rep) for rep in representatives]
+            ranked.sort(key=lambda item: item[0]["overall"], reverse=True)
+            candidate_parts, candidate = ranked[0]
         if chosen is None:
             signature = _phase_signature_from_descriptor(desc)
             chosen = {
@@ -1583,8 +2217,13 @@ def assign_phase_reference_signatures(phases):
         ph["active_reference_id"] = str(chosen["reference_id"])
         ph["phase_signature_basis"] = desc
         ph["phase_signature_reason"] = str(reason)
-        ph["phase_signature_scope"] = str(getattr(CFG, "PHASE_REFERENCE_SCOPE", "significant_external"))
+        ph["phase_signature_scope"] = "exact_external" if reuse_mode == "exact_only" else str(getattr(CFG, "PHASE_REFERENCE_SCOPE", "significant_external"))
         ph["phase_signature_base_phase_id"] = int(chosen.get("base_phase_id", ph.get("phase_id", 0)))
+        ph["phase_reference_reuse_mode"] = reuse_mode
+        ph["phase_reference_candidate_signature"] = str(candidate.get("signature", "")) if isinstance(candidate, dict) else ""
+        ph["phase_reference_candidate_overall_similarity"] = float(candidate_parts.get("overall", 0.0))
+        ph["phase_reference_candidate_taskmix_similarity"] = float(candidate_parts.get("taskmix", 0.0))
+        ph["phase_reference_candidate_intensity_similarity"] = float(candidate_parts.get("intensity", 0.0))
         out.append(ph)
     return out
 
@@ -1693,7 +2332,18 @@ def _reference_for_phase_from_bank(bank, phase):
 
 
 def _write_reference_bank(cache, output_dir=None):
-    clean_cache = {str(k): v for k, v in dict(cache or {}).items() if isinstance(v, dict)}
+    def valid_reference(ref):
+        if not isinstance(ref, dict):
+            return False
+        try:
+            return (
+                np.isfinite(float(ref.get("delay_ref", np.nan)))
+                and np.isfinite(float(ref.get("energy_per_arrival_ref", ref.get("energy_ref", np.nan))))
+            )
+        except Exception:
+            return False
+
+    clean_cache = {str(k): v for k, v in dict(cache or {}).items() if valid_reference(v)}
     if not clean_cache:
         return
     if output_dir:

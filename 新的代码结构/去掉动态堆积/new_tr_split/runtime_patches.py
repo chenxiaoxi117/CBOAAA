@@ -141,6 +141,18 @@ def _cbo_cli_option(name, attr, default=None):
     return getattr(CFG, attr, default)
 
 
+def _csv_option_set(value):
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        raw = []
+        for item in value:
+            raw.extend(str(item).split(","))
+    else:
+        raw = str(value).replace(";", ",").split(",")
+    return {str(x).strip() for x in raw if str(x).strip()}
+
+
 def apply_cbo_stability_policy_override(groups):
     values = {
         "cbo_history_select_mode": _cbo_cli_option("--cbo-history-select-mode", "CBO_HISTORY_SELECT_MODE", "recent"),
@@ -153,6 +165,23 @@ def apply_cbo_stability_policy_override(groups):
         "cbo_external_internal_topk": _cbo_cli_option("--cbo-external-topk", "CBO_EXTERNAL_INTERNAL_TOPK", 400),
         "cbo_external_internal_min_rows": _cbo_cli_option("--cbo-external-min-rows", "CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40),
         "cbo_external_internal_recent_keep": _cbo_cli_option("--cbo-external-recent-keep", "CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20),
+        "cbo_history_target_rows": _cbo_cli_option("--cbo-history-target-rows", "CBO_HISTORY_TARGET_ROWS", 80),
+        "cbo_history_similar_keep": _cbo_cli_option("--cbo-history-similar-keep", "CBO_HISTORY_SIMILAR_KEEP", 16),
+        "cbo_history_global_keep": _cbo_cli_option("--cbo-history-global-keep", "CBO_HISTORY_GLOBAL_KEEP", 4),
+        "cbo_history_global_max": _cbo_cli_option("--cbo-history-global-max", "CBO_HISTORY_GLOBAL_MAX", 20),
+        "cbo_phase_memory_keep": _cbo_cli_option("--cbo-phase-memory-keep", "CBO_PHASE_MEMORY_KEEP", 10),
+        "cbo_phase_component_sim_threshold": _cbo_cli_option("--cbo-phase-component-sim-threshold", "CBO_PHASE_COMPONENT_SIM_THRESHOLD", 0.70),
+        "cbo_phase_exact_intensity_tol": _cbo_cli_option("--cbo-phase-exact-intensity-tol", "CBO_PHASE_EXACT_INTENSITY_TOL", 0.10),
+        "cbo_phase_exact_taskmix_l1_tol": _cbo_cli_option("--cbo-phase-exact-taskmix-l1-tol", "CBO_PHASE_EXACT_TASKMIX_L1_TOL", 0.06),
+        "cbo_phase_taskmix_min_sim": _cbo_cli_option("--cbo-phase-taskmix-min-sim", "CBO_PHASE_TASKMIX_MIN_SIM", 0.70),
+        "cbo_phase_overall_sim_threshold": _cbo_cli_option("--cbo-phase-overall-sim-threshold", "CBO_PHASE_OVERALL_SIM_THRESHOLD", 0.65),
+        "cbo_phase_taskmix_weight": _cbo_cli_option("--cbo-phase-taskmix-weight", "CBO_PHASE_TASKMIX_WEIGHT", 0.75),
+        "cbo_phase_similar_initial_cap": _cbo_cli_option("--cbo-phase-similar-initial-cap", "CBO_PHASE_SIMILAR_INITIAL_CAP", 40),
+        "cbo_phase_similar_decay_end": _cbo_cli_option("--cbo-phase-similar-decay-end", "CBO_PHASE_SIMILAR_DECAY_END", 80),
+        "cbo_phase_archive_per_scene": _cbo_cli_option("--cbo-phase-archive-per-scene", "CBO_PHASE_ARCHIVE_PER_SCENE", 80),
+        "cbo_external_intensity_max_diff": _cbo_cli_option("--cbo-external-intensity-max-diff", "CBO_EXTERNAL_INTENSITY_MAX_DIFF", -1.0),
+        "cbo_external_lengthscale_intensity": _cbo_cli_option("--cbo-external-lengthscale-intensity", "CBO_EXTERNAL_LENGTHSCALE_INTENSITY", 0.75),
+        "cbo_external_lengthscale_taskmix": _cbo_cli_option("--cbo-external-lengthscale-taskmix", "CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25),
         "cbo_elite_k": _cbo_cli_option("--cbo-elite-k", "CBO_ELITE_K", 20),
         "cbo_diverse_k": _cbo_cli_option("--cbo-diverse-k", "CBO_DIVERSE_K", 20),
         "cbo_robust_score_mode": _cbo_cli_option("--cbo-robust-score-mode", "CBO_ROBUST_SCORE_MODE", "none"),
@@ -271,13 +300,77 @@ def apply_cbo_stability_policy_override(groups):
         values["cbo_state_kernel_max_rate_dist"] = float(getattr(CFG, "CBO_STATE_KERNEL_MAX_RATE_DIST", getattr(CFG, "CBO_STATE_KERNEL_MAX_TREND_DIST", 3.0)))
         values["cbo_state_kernel_rate_sign_veto"] = bool(getattr(CFG, "CBO_STATE_KERNEL_RATE_SIGN_VETO", True))
     any_explicit = any(v is not None for v in values.values())
+    history_target_methods = _csv_option_set(getattr(CFG, "CBO_HISTORY_SELECT_TARGETS", ""))
+    history_override_keys = {
+        "cbo_history_select_mode",
+        "cbo_context_k",
+        "cbo_context_min_rows",
+        "cbo_context_recent_keep",
+        "cbo_context_weak_fallback_k",
+        "cbo_global_context_sim_threshold",
+        "cbo_external_internal_sim_threshold",
+        "cbo_external_internal_topk",
+        "cbo_external_internal_min_rows",
+        "cbo_external_internal_recent_keep",
+        "cbo_history_target_rows",
+        "cbo_history_similar_keep",
+        "cbo_history_global_keep",
+        "cbo_history_global_max",
+        "cbo_phase_memory_keep",
+        "cbo_phase_component_sim_threshold",
+        "cbo_phase_exact_intensity_tol",
+        "cbo_phase_exact_taskmix_l1_tol",
+        "cbo_external_intensity_max_diff",
+        "cbo_external_lengthscale_intensity",
+        "cbo_external_lengthscale_taskmix",
+        "cbo_context_sim_threshold",
+        "cbo_state_kernel_topk",
+        "cbo_state_kernel_min_rows",
+        "cbo_state_kernel_recent_keep",
+        "cbo_state_kernel_threshold",
+        "cbo_state_kernel_fallback",
+        "cbo_state_kernel_max_workload_dist",
+        "cbo_state_kernel_max_state_dist",
+        "cbo_state_kernel_max_trend_dist",
+        "cbo_state_kernel_max_unfinished_diff",
+        "cbo_state_kernel_max_backlog_diff",
+        "cbo_state_kernel_trend_sign_veto",
+        "cbo_state_kernel_trend_sign_min",
+        "cbo_state_kernel_rate_gain",
+        "cbo_state_kernel_rate_power",
+        "cbo_state_kernel_max_rate_dist",
+        "cbo_state_kernel_rate_sign_veto",
+        "cbo_macro_gate_mode",
+        "cbo_macro_k",
+        "cbo_macro_total_scale",
+        "cbo_macro_lengthscale_total",
+        "cbo_macro_lengthscale_rt",
+        "cbo_macro_lengthscale_batch",
+        "cbo_macro_alpha",
+    }
     for group_key, group_cfg in (groups or {}).items():
         if _is_cbo_method_key(group_key, group_cfg):
             if any_explicit:
+                apply_history_overrides = (not history_target_methods) or str(group_key) in history_target_methods
+                applied_any = False
                 for k, v in values.items():
+                    if history_target_methods and k in history_override_keys and not apply_history_overrides:
+                        continue
                     if v is not None:
                         group_cfg[k] = v
-                group_cfg["cbo_stability_override_source"] = "cli_override_cbo_only"
+                        applied_any = True
+                if history_target_methods:
+                    group_cfg["cbo_history_select_targets"] = ",".join(sorted(history_target_methods))
+                    group_cfg["cbo_history_select_targeted"] = bool(apply_history_overrides)
+                    if not apply_history_overrides:
+                        # Keep non-target CBO methods on their method-level/default selector.
+                        # Otherwise configure_refactor_agent falls back to the global CLI
+                        # --cbo-history-select-mode and contaminates the control methods.
+                        group_cfg.setdefault("cbo_history_select_mode", "recent")
+                if applied_any:
+                    group_cfg["cbo_stability_override_source"] = "cli_override_cbo_only"
+                elif history_target_methods:
+                    group_cfg.setdefault("cbo_stability_override_source", "method_default_not_history_target")
             else:
                 group_cfg.setdefault("cbo_history_select_mode", "recent")
                 group_cfg.setdefault("cbo_robust_score_mode", "none")
@@ -340,6 +433,23 @@ def method_history_policy_map(groups):
             "external_internal_topk": group_cfg.get("cbo_external_internal_topk", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_TOPK", 400)),
             "external_internal_min_rows": group_cfg.get("cbo_external_internal_min_rows", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40)),
             "external_internal_recent_keep": group_cfg.get("cbo_external_internal_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20)),
+            "history_target_rows": group_cfg.get("cbo_history_target_rows", _cfg_cbo_int("CBO_HISTORY_TARGET_ROWS", 80)),
+            "history_similar_keep": group_cfg.get("cbo_history_similar_keep", _cfg_cbo_int("CBO_HISTORY_SIMILAR_KEEP", 16)),
+            "history_global_keep": group_cfg.get("cbo_history_global_keep", _cfg_cbo_int("CBO_HISTORY_GLOBAL_KEEP", 4)),
+            "history_global_max": group_cfg.get("cbo_history_global_max", _cfg_cbo_int("CBO_HISTORY_GLOBAL_MAX", 20)),
+            "phase_memory_keep": group_cfg.get("cbo_phase_memory_keep", _cfg_cbo_int("CBO_PHASE_MEMORY_KEEP", 10)),
+            "phase_component_sim_threshold": group_cfg.get("cbo_phase_component_sim_threshold", _cfg_cbo_float("CBO_PHASE_COMPONENT_SIM_THRESHOLD", 0.70)),
+            "phase_exact_intensity_tol": group_cfg.get("cbo_phase_exact_intensity_tol", _cfg_cbo_float("CBO_PHASE_EXACT_INTENSITY_TOL", 0.10)),
+            "phase_exact_taskmix_l1_tol": group_cfg.get("cbo_phase_exact_taskmix_l1_tol", _cfg_cbo_float("CBO_PHASE_EXACT_TASKMIX_L1_TOL", 0.06)),
+            "phase_taskmix_min_sim": group_cfg.get("cbo_phase_taskmix_min_sim", _cfg_cbo_float("CBO_PHASE_TASKMIX_MIN_SIM", 0.70)),
+            "phase_overall_sim_threshold": group_cfg.get("cbo_phase_overall_sim_threshold", _cfg_cbo_float("CBO_PHASE_OVERALL_SIM_THRESHOLD", 0.65)),
+            "phase_taskmix_weight": group_cfg.get("cbo_phase_taskmix_weight", _cfg_cbo_float("CBO_PHASE_TASKMIX_WEIGHT", 0.75)),
+            "phase_similar_initial_cap": group_cfg.get("cbo_phase_similar_initial_cap", _cfg_cbo_int("CBO_PHASE_SIMILAR_INITIAL_CAP", 40)),
+            "phase_similar_decay_end": group_cfg.get("cbo_phase_similar_decay_end", _cfg_cbo_int("CBO_PHASE_SIMILAR_DECAY_END", 80)),
+            "phase_archive_per_scene": group_cfg.get("cbo_phase_archive_per_scene", _cfg_cbo_int("CBO_PHASE_ARCHIVE_PER_SCENE", 80)),
+            "external_intensity_max_diff": group_cfg.get("cbo_external_intensity_max_diff", _cfg_cbo_float("CBO_EXTERNAL_INTENSITY_MAX_DIFF", -1.0)),
+            "external_lengthscale_intensity": group_cfg.get("cbo_external_lengthscale_intensity", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_INTENSITY", 0.75)),
+            "external_lengthscale_taskmix": group_cfg.get("cbo_external_lengthscale_taskmix", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25)),
             "elite_k": group_cfg.get("cbo_elite_k", _cfg_cbo_int("CBO_ELITE_K", 20)),
             "diverse_k": group_cfg.get("cbo_diverse_k", _cfg_cbo_int("CBO_DIVERSE_K", 20)),
             "robust_score_mode": group_cfg.get("cbo_robust_score_mode", _cfg_cbo_str("CBO_ROBUST_SCORE_MODE", "none")),
@@ -1009,13 +1119,21 @@ def _cbo_adaptive_scene_key(agent):
 def _cbo_adaptive_exploration_info(agent, context, effective_samples, sigma_scale):
     window = max(4, int(getattr(agent, "cbo_adaptive_exploration_window", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_WINDOW", 30))))
     sample_target = max(1, int(getattr(agent, "cbo_adaptive_exploration_sample_target", _cfg_cbo_int("CBO_ADAPTIVE_EXPLORATION_SAMPLE_TARGET", 80))))
+    relation = str(dict(getattr(agent, "last_history_debug", {}) or {}).get("phase_reuse_relation", "unknown") or "unknown").strip().lower()
+    if bool(getattr(agent, "cbo_relation_sample_targets_enabled", False)):
+        relation_targets = {
+            "exact": max(1, int(getattr(agent, "cbo_exact_sample_target", 80))),
+            "similar": max(1, int(getattr(agent, "cbo_similar_sample_target", 45))),
+            "novel": max(1, int(getattr(agent, "cbo_novel_sample_target", 80))),
+        }
+        sample_target = relation_targets.get(relation, relation_targets["novel"])
     smoothing = float(np.clip(getattr(agent, "cbo_adaptive_exploration_smoothing", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_SMOOTHING", 0.20)), 0.0, 1.0))
     progress_ref = max(1e-9, float(getattr(agent, "cbo_adaptive_exploration_progress_pct", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_PROGRESS_PCT", 0.01))))
     reexplore_gain = float(np.clip(getattr(agent, "cbo_adaptive_exploration_reexplore_gain", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_REEXPLORE_GAIN", 0.25)), 0.0, 1.0))
     beta_max = max(0.0, float(getattr(agent, "cbo_adaptive_exploration_beta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_BETA_MAX", 3.0))))
     eta_max = float(np.clip(getattr(agent, "cbo_adaptive_exploration_eta_max", _cfg_cbo_float("CBO_ADAPTIVE_EXPLORATION_ETA_MAX", 0.25)), 0.0, 1.0))
 
-    n_eff = max(0, int(effective_samples or 0))
+    n_eff = max(0.0, float(effective_samples or 0.0))
     data_need_linear = float(np.clip(1.0 - n_eff / float(sample_target), 0.0, 1.0))
     data_need = float(np.sqrt(data_need_linear))
     scene_key = _cbo_adaptive_scene_key(agent)
@@ -1058,7 +1176,9 @@ def _cbo_adaptive_exploration_info(agent, context, effective_samples, sigma_scal
     risk = max(risk_components.values())
     safety_factor = float(np.clip(1.0 - risk, 0.0, 1.0))
     reexplore_need = float(reexplore_gain * stagnation * uncertainty_need)
-    demand_target = float(np.clip(max(data_need, reexplore_need) * safety_factor, 0.0, 1.0))
+    prediction_error_reexplore = bool(getattr(agent, "cbo_prediction_error_reexplore", getattr(CFG, "CBO_PREDICTION_ERROR_REEXPLORE", False)))
+    forced_reexplore_need = 1.0 if prediction_error_reexplore and _cbo_force_exploration_active(agent) else 0.0
+    demand_target = float(np.clip(max(data_need, reexplore_need, forced_reexplore_need) * safety_factor, 0.0, 1.0))
 
     states = dict(getattr(agent, "cbo_adaptive_exploration_state_by_scene", {}) or {})
     previous = states.get(scene_key, {}).get("demand")
@@ -1069,6 +1189,8 @@ def _cbo_adaptive_exploration_info(agent, context, effective_samples, sigma_scal
     reason = max(risk_components, key=risk_components.get) if risk > 0.0 else "none"
     info = {
         "adaptive_scene_key": scene_key,
+        "adaptive_phase_relation": relation,
+        "adaptive_sample_target": int(sample_target),
         "adaptive_exploration_demand": demand,
         "adaptive_exploration_target": demand_target,
         "adaptive_beta": beta_max * demand,
@@ -1076,12 +1198,13 @@ def _cbo_adaptive_exploration_info(agent, context, effective_samples, sigma_scal
         "adaptive_data_need": data_need,
         "adaptive_data_need_linear": data_need_linear,
         "adaptive_reexplore_need": reexplore_need,
+        "adaptive_forced_reexplore_need": forced_reexplore_need,
         "adaptive_reexplore_gain": reexplore_gain,
         "adaptive_stagnation": stagnation,
         "adaptive_uncertainty_need": uncertainty_need,
         "adaptive_safety_factor": safety_factor,
         "adaptive_dynamic_risk": risk,
-        "adaptive_effective_samples": n_eff,
+        "adaptive_effective_samples": float(n_eff),
         "adaptive_progress_rate": float(progress_rate) if np.isfinite(progress_rate) else np.nan,
         "adaptive_risk_reason": reason,
         "adaptive_risk_backlog": risk_parts["backlog"],
@@ -1127,7 +1250,12 @@ def _cbo_select_index_from_scores(agent, mu, sigma, score, default_reason="greed
     # deployment regardless of whether the calibration buffer is enabled.
     _, sigma_acq_info = _cbo_sigma_for_acquisition(agent, [0.0], [0.0])
     sigma_acq_mode = str(sigma_acq_info.get("sigma_calibration_use_in_acq", "false"))
-    if str(default_reason) == "greedy_posterior_mean" and beta_mode == "fixed" and sigma_acq_mode == "false":
+    mean_only_selection = (
+        str(default_reason) == "greedy_posterior_mean"
+        and beta_mode == "fixed"
+        and sigma_acq_mode == "false"
+    )
+    if mean_only_selection:
         greedy_idx = _cbo_numpy_argmax_safe(mu)
     else:
         greedy_idx = _cbo_numpy_argmax_safe(score)
@@ -1135,7 +1263,9 @@ def _cbo_select_index_from_scores(agent, mu, sigma, score, default_reason="greed
     triggered = _cbo_force_exploration_active(agent) or select_mode in {"topk_stochastic", "epsilon_greedy", "randomized_ucb"}
     if not triggered or select_mode == "greedy":
         try:
-            agent.cbo_last_actual_beta_used = float(getattr(agent, "cbo_last_beta_eff", getattr(agent, "cbo_acq_beta", 0.0)))
+            agent.cbo_last_actual_beta_used = 0.0 if mean_only_selection else float(
+                getattr(agent, "cbo_last_beta_eff", getattr(agent, "cbo_acq_beta", 0.0))
+            )
         except Exception:
             pass
         return greedy_idx, default_reason
@@ -1615,6 +1745,7 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
     predicted_cost = feedback["predicted_cost"]
     raw_error = feedback["prediction_error"]
     surprise = feedback["calibrated_surprise"]
+    raw_surprise = feedback["raw_surprise"]
 
     # radius-min stuck counter
     r = float(getattr(agent, "trust_radius", np.nan))
@@ -1636,20 +1767,67 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
     gap_thr = float(getattr(agent, "cbo_surprise_cost_gap_pct", _cfg_cbo_float("CBO_SURPRISE_COST_GAP_PCT", 0.03)))
     rebound_thr = float(getattr(agent, "cbo_rebound_threshold_pct", _cfg_cbo_float("CBO_REBOUND_THRESHOLD_PCT", 0.03)))
     stuck_thr = int(getattr(agent, "cbo_radius_min_stuck_rounds", _cfg_cbo_int("CBO_RADIUS_MIN_STUCK_ROUNDS", 10)))
-    residual_trigger = bool(np.isfinite(surprise) and surprise >= z_thr and cost_gap_pct >= gap_thr)
+    prediction_error_reexplore = bool(getattr(agent, "cbo_prediction_error_reexplore", getattr(CFG, "CBO_PREDICTION_ERROR_REEXPLORE", False)))
+    trigger_surprise = raw_surprise if prediction_error_reexplore else surprise
+    trigger_surprise_source = "raw_surprise" if prediction_error_reexplore else "calibrated_surprise"
+    residual_condition_trigger = bool(np.isfinite(trigger_surprise) and trigger_surprise >= z_thr and cost_gap_pct >= gap_thr)
+    phase_max_iter = max(0, int(getattr(agent, "cbo_prediction_error_reexplore_phase_max_iter", 0)))
+    current_bo_iter = max(0, int(getattr(agent, "step_count", 1)) - 1)
+    reexplore_phase_id, _, reexplore_phase_iter = _cbo_dynamic_phase_position_for_iter(current_bo_iter)
+    phase_window_allowed = bool(
+        phase_max_iter <= 0
+        or (reexplore_phase_iter is not None and int(reexplore_phase_iter) <= phase_max_iter)
+    )
+    relation = str(dict(getattr(agent, "last_history_debug", {}) or {}).get("phase_reuse_relation", "unknown") or "unknown").lower()
+    relation_aware = bool(getattr(agent, "cbo_relation_aware_reexplore", False))
+    relation_allowed = (not relation_aware) or relation in set(getattr(agent, "cbo_reexplore_relations", {"similar", "novel"}) or set())
+    consecutive_required = max(1, int(getattr(agent, "cbo_reexplore_consecutive_required", 1))) if relation_aware else 1
+    max_phase_triggers = max(0, int(getattr(agent, "cbo_reexplore_max_triggers_per_phase", 0))) if relation_aware else 0
+    phase_key = str(reexplore_phase_id if reexplore_phase_id is not None else "single")
+    states = dict(getattr(agent, "cbo_reexplore_state_by_phase", {}) or {})
+    phase_state = dict(states.get(phase_key, {}) or {})
+    consecutive = int(phase_state.get("consecutive", 0))
+    consecutive = consecutive + 1 if residual_condition_trigger else 0
+    trigger_count = int(phase_state.get("trigger_count", 0))
+    countdown_active = int(getattr(agent, "cbo_force_explore_countdown", 0)) > 0
+    no_renew = bool(getattr(agent, "cbo_reexplore_no_renew_during_countdown", False)) if relation_aware else False
+    trigger_quota_available = (not relation_aware) or max_phase_triggers <= 0 or trigger_count < max_phase_triggers
+    residual_trigger = bool(
+        residual_condition_trigger
+        and phase_window_allowed
+        and relation_allowed
+        and consecutive >= consecutive_required
+        and trigger_quota_available
+        and not (no_renew and countdown_active)
+    )
+    if residual_trigger:
+        trigger_count += 1
+        consecutive = 0
+    phase_state.update({"consecutive": int(consecutive), "trigger_count": int(trigger_count), "relation": relation})
+    states[phase_key] = phase_state
+    agent.cbo_reexplore_state_by_phase = states
     condition_trigger = bool(cost_gap_pct >= rebound_thr or int(getattr(agent, "cbo_radius_min_stuck_count", 0)) >= stuck_thr)
-    trigger = (tr_mode == "residual_adaptive" and residual_trigger) or (tr_mode == "condition_adaptive" and condition_trigger)
+    trigger = (
+        (tr_mode == "residual_adaptive" and residual_trigger)
+        or (tr_mode == "condition_adaptive" and condition_trigger)
+        or (prediction_error_reexplore and residual_trigger)
+    )
 
     if trigger:
-        reset = float(getattr(agent, "cbo_radius_reset", _cfg_cbo_float("CBO_RADIUS_RESET", 0.12)))
-        r_max = float(getattr(agent, "cbo_tr_radius_max", _cfg_cbo_float("CBO_TR_RADIUS_MAX", getattr(CFG, "TRUST_RADIUS_MAX", 0.35))))
-        r_min = float(getattr(agent, "cbo_tr_radius_min", _cfg_cbo_float("CBO_TR_RADIUS_MIN", getattr(CFG, "TRUST_RADIUS_MIN", 0.04))))
-        agent.trust_radius = float(np.clip(max(reset, r), r_min, r_max))
+        if tr_mode in {"residual_adaptive", "condition_adaptive"}:
+            reset = float(getattr(agent, "cbo_radius_reset", _cfg_cbo_float("CBO_RADIUS_RESET", 0.12)))
+            r_max = float(getattr(agent, "cbo_tr_radius_max", _cfg_cbo_float("CBO_TR_RADIUS_MAX", getattr(CFG, "TRUST_RADIUS_MAX", 0.35))))
+            r_min = float(getattr(agent, "cbo_tr_radius_min", _cfg_cbo_float("CBO_TR_RADIUS_MIN", getattr(CFG, "TRUST_RADIUS_MIN", 0.04))))
+            agent.trust_radius = float(np.clip(max(reset, r), r_min, r_max))
         agent.cbo_force_explore_countdown = max(int(getattr(agent, "cbo_force_explore_countdown", 0)), int(getattr(agent, "cbo_selection_cooldown", _cfg_cbo_int("CBO_SELECTION_COOLDOWN", 5))))
-        anchor_switch = str(getattr(agent, "cbo_condition_anchor_switch", _cfg_cbo_str("CBO_CONDITION_ANCHOR_SWITCH", "context_best")) or "off").lower()
-        if anchor_switch != "off":
-            agent.cbo_runtime_anchor_override = anchor_switch
-        agent.cbo_tr_update_reason = ("residual_surprise_reset" if residual_trigger else "condition_rebound_or_radius_stuck_reset")
+        if tr_mode in {"residual_adaptive", "condition_adaptive"}:
+            anchor_switch = str(getattr(agent, "cbo_condition_anchor_switch", _cfg_cbo_str("CBO_CONDITION_ANCHOR_SWITCH", "context_best")) or "off").lower()
+            if anchor_switch != "off":
+                agent.cbo_runtime_anchor_override = anchor_switch
+        agent.cbo_tr_update_reason = (
+            "prediction_error_reexplore" if prediction_error_reexplore and tr_mode == "off"
+            else ("residual_surprise_reset" if residual_trigger else "condition_rebound_or_radius_stuck_reset")
+        )
     else:
         # Decrease countdown after each observed feedback.
         if int(getattr(agent, "cbo_force_explore_countdown", 0)) > 0:
@@ -1664,7 +1842,20 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
         "cbo_epsilon": float(getattr(agent, "cbo_epsilon", _cfg_cbo_float("CBO_EPSILON", 0.10))),
         "cbo_acq_beta": float(getattr(agent, "cbo_acq_beta", _cfg_cbo_float("CBO_ACQ_BETA", 3.0))),
         "cost_gap_pct": float(cost_gap_pct),
+        "residual_condition_trigger": int(residual_condition_trigger),
         "residual_trigger": int(residual_trigger),
+        "residual_trigger_surprise": float(trigger_surprise) if np.isfinite(trigger_surprise) else np.nan,
+        "residual_trigger_surprise_source": str(trigger_surprise_source),
+        "reexplore_phase_iter": int(reexplore_phase_iter) if reexplore_phase_iter is not None else np.nan,
+        "reexplore_phase_max_iter": int(phase_max_iter),
+        "reexplore_phase_window_allowed": int(phase_window_allowed),
+        "reexplore_relation": relation,
+        "reexplore_relation_allowed": int(relation_allowed),
+        "reexplore_consecutive_count": int(consecutive),
+        "reexplore_consecutive_required": int(consecutive_required),
+        "reexplore_phase_trigger_count": int(trigger_count),
+        "reexplore_phase_trigger_limit": int(max_phase_triggers),
+        "reexplore_countdown_renew_blocked": int(no_renew and countdown_active),
         "condition_trigger": int(condition_trigger),
         "radius_min_stuck_count": int(getattr(agent, "cbo_radius_min_stuck_count", 0)),
         "force_explore_countdown": int(getattr(agent, "cbo_force_explore_countdown", 0)),
@@ -1675,9 +1866,41 @@ def _cbo_update_residual_condition_state(agent, actual_cost):
     return debug
 
 def _safebo_posterior_mean_theta(agent, state=None, context=None):
+    def fallback_info(selection):
+        info = {"selection": selection, "mu": None, "sigma": None, "candidate_count": 1}
+        debug = dict(getattr(agent, "last_debug_info", {}) or {})
+        if selection == "phase_reference_probe":
+            for key, value in debug.items():
+                if str(key).startswith("phase_reference_probe_"):
+                    info[key] = value
+            for key in [
+                "phase_reuse_relation", "phase_reuse_target_reference_ready",
+                "phase_reuse_current_selected_count", "phase_reuse_exact_selected_count",
+                "phase_reuse_partial_selected_count", "phase_reuse_global_selected_count",
+                "phase_reuse_total_selected_count", "history_reference_mismatch_count",
+                "history_relabelled_count", "history_relabel_delta_mean",
+                "history_relabel_delta_max_abs",
+            ]:
+                info[key] = debug.get(key)
+            info["selection"] = "phase_reference_probe"
+            info["selected_candidate_source"] = "phase_reference_probe"
+            info["selected_reason"] = "phase_reference_probe"
+        return info
+
+    probe_theta, probe_debug = _cbo_phase_reference_probe_theta(agent)
+    if probe_theta is not None:
+        theta = _cbo_commit_phase_reference_probe(agent, probe_theta, probe_debug)
+        return theta, fallback_info("phase_reference_probe")
+    if isinstance(getattr(agent, "last_debug_info", None), dict):
+        for key in list(agent.last_debug_info):
+            if str(key).startswith("phase_reference_probe_"):
+                agent.last_debug_info.pop(key, None)
+        if agent.last_debug_info.get("phase_reuse_relation") == "reference_probe":
+            agent.last_debug_info.pop("phase_reuse_relation", None)
+
     if getattr(agent, "anchor_points", None) and agent.step_count < len(agent.anchor_points):
         theta = agent.ask(state=state, context=context)
-        return theta, {"selection": "anchor_or_original_ask", "mu": None, "sigma": None, "candidate_count": 1}
+        return theta, fallback_info("anchor_or_original_ask")
 
     try:
         _, _, records = agent._training_data(state=state)
@@ -1686,17 +1909,19 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
 
     if len(records) < 2:
         theta = agent.ask(state=state, context=context)
-        return theta, {"selection": "cold_start_original_ask", "mu": None, "sigma": None, "candidate_count": 1}
+        return theta, fallback_info("cold_start_original_ask")
 
     model_pack = agent.fit_local_gp(state=state)
     if model_pack is None:
         theta = agent.ask(state=state, context=context)
-        return theta, {"selection": "fit_failed_original_ask", "mu": None, "sigma": None, "candidate_count": 1}
+        return theta, fallback_info("fit_failed_original_ask")
+    transfer_noise_info = dict(model_pack.get("transfer_noise_info", {}) or {})
+    transfer_noise_info = dict(model_pack.get("transfer_noise_info", {}) or {})
 
     candidates = _safebo_candidate_pool(agent, state=state, context=context)
     if not candidates:
         theta = agent.ask(state=state, context=context)
-        return theta, {"selection": "empty_pool_original_ask", "mu": None, "sigma": None, "candidate_count": 1}
+        return theta, fallback_info("empty_pool_original_ask")
     sources = list(getattr(agent, "_last_candidate_sources", []) or [])
     if len(sources) < len(candidates):
         sources += ["posterior_mean_candidate"] * (len(candidates) - len(sources))
@@ -1722,9 +1947,13 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
             adaptive_info = {}
             if sigma_mode == "adaptive":
                 try:
-                    effective_samples = int(gp.train_inputs[0].shape[-2])
+                    effective_samples = float(gp.train_inputs[0].shape[-2])
                 except Exception:
-                    effective_samples = len(list(getattr(agent, "local_recent", []) or []))
+                    effective_samples = float(len(list(getattr(agent, "local_recent", []) or [])))
+                if bool(getattr(agent, "cbo_adaptive_use_weighted_phase_samples", False)):
+                    weighted = dict(getattr(agent, "last_history_debug", {}) or {}).get("phase_reuse_weighted_effective_samples")
+                    if weighted is not None and np.isfinite(float(weighted)):
+                        effective_samples = max(0.0, float(weighted))
                 adaptive_info = _cbo_adaptive_exploration_info(
                     agent, context, effective_samples, calibration_info.get("sigma_scale", 1.0),
                 )
@@ -1761,7 +1990,15 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
             beta_info.update(guard_info)
             beta_info.update(calibration_info)
             beta_info.update(sigma_acq_info)
-            beta_info["actual_score_formula"] = "mu + adaptive_beta * sigma_acq within RMSE margin" if sigma_mode == "adaptive" else "mu + beta_eff * sigma_acq"
+            beta_info.update(transfer_noise_info)
+            beta_info.update(transfer_noise_info)
+            if sigma_mode == "adaptive":
+                beta_info["actual_score_formula"] = "mu + adaptive_beta * sigma_acq within RMSE margin"
+            elif sigma_mode == "false" and str(getattr(agent, "cbo_acq_beta_mode", "fixed")).strip().lower() == "fixed":
+                beta_info["actual_score_formula"] = "mu (posterior mean only)"
+                beta_info["actual_beta_used"] = 0.0
+            else:
+                beta_info["actual_score_formula"] = "mu + beta_eff * sigma_acq"
             try:
                 agent.cbo_last_beta_info = dict(beta_info)
             except Exception:
@@ -1817,6 +2054,8 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
         debug.update(cand_summary)
         debug.update(beta_info)
         debug.update({
+            "best_selected": list(theta),
+            "candidate_count": int(len(candidates)),
             "selected_candidate_source": str(sources[best_idx] if 0 <= best_idx < len(sources) else "posterior_mean_candidate"),
             "selected_candidate_mu": float(mu[best_idx].item()),
             "selected_candidate_sigma": sigma_acq_selected,
@@ -1867,7 +2106,7 @@ def _safebo_posterior_mean_theta(agent, state=None, context=None):
         }
     except Exception as e:
         theta = agent.ask(state=state, context=context)
-        return theta, {"selection": "posterior_failed_original_ask_" + type(e).__name__, "mu": None, "sigma": None, "candidate_count": 1}
+        return theta, fallback_info("posterior_failed_original_ask_" + type(e).__name__)
 
 
 def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
@@ -1979,8 +2218,20 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
     info.update(robust_info)
     info.update(pred_guard_active_info)
     if agent is not None:
-        debug = dict(getattr(agent, "last_debug_info", {}) or {})
+        last_debug = dict(getattr(agent, "last_debug_info", {}) or {})
+        debug = dict(last_debug)
         debug.update(dict(getattr(agent, "last_history_debug", {}) or {}))
+        if last_debug.get("phase_reference_probe_used"):
+            for key, value in last_debug.items():
+                if str(key).startswith("phase_reference_probe_") or key in {
+                    "phase_reuse_relation", "phase_reuse_target_reference_ready",
+                    "phase_reuse_current_selected_count", "phase_reuse_exact_selected_count",
+                    "phase_reuse_partial_selected_count", "phase_reuse_global_selected_count",
+                    "phase_reuse_total_selected_count", "history_reference_mismatch_count",
+                    "history_relabelled_count", "history_relabel_delta_mean",
+                    "history_relabel_delta_max_abs",
+                }:
+                    debug[key] = value
         debug.update(dict(getattr(agent, "cbo_last_history_denoise_stats", {}) or {}))
         for k in [
             "history_select_mode", "effective_history_mode", "effective_recent_window",
@@ -2027,6 +2278,62 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "selected_external_similarity_mean", "selected_external_similarity_min",
             "selected_external_similarity_max", "external_gate_current_context",
             "external_context_feature_names",
+            "external_internal_threshold_enabled", "external_internal_external_threshold",
+            "external_internal_internal_threshold", "external_internal_external_topk",
+            "external_internal_context_k", "external_internal_min_rows",
+            "external_internal_external_min_rows", "external_internal_recent_keep",
+            "external_internal_weak_fallback_k", "external_internal_raw_records",
+            "external_internal_external_passed_count", "external_internal_external_pool_count",
+            "external_internal_internal_scored_count", "external_internal_internal_strong_count",
+            "external_internal_internal_weak_count", "external_internal_selected_strong_count",
+            "external_internal_selected_weak_count", "external_internal_selected_recent_count",
+            "external_internal_final_fallback_count", "external_internal_fallback_used",
+            "external_internal_external_fallback_used", "external_internal_external_fallback_reason",
+            "external_internal_external_similarity_max", "external_internal_external_similarity_mean",
+            "external_internal_external_similarity_p50", "external_internal_external_pool_similarity_mean",
+            "external_internal_external_pool_similarity_min", "external_internal_internal_similarity_max",
+            "external_internal_internal_similarity_mean", "external_internal_internal_similarity_p50",
+            "external_internal_selected_external_similarity_mean",
+            "external_internal_selected_external_similarity_min",
+            "external_internal_selected_internal_similarity_mean",
+            "external_internal_selected_internal_similarity_min",
+            "external_internal_selected_phase_counts",
+            "decay_history_target_rows", "decay_history_current_phase_id",
+            "decay_history_current_phase_name", "decay_history_current_available_count",
+            "decay_history_current_selected_count", "decay_history_similar_budget",
+            "decay_history_similar_selected_count", "decay_history_global_selected_count",
+            "decay_history_similar_keep", "decay_history_global_keep",
+            "decay_history_global_max", "decay_history_external_intensity_max_diff",
+            "decay_history_intensity_rejected_count",
+            "phase_reuse_relation", "phase_reuse_current_bo_iter", "phase_reuse_current_phase_id", "phase_reuse_current_phase_name",
+            "phase_reuse_target_rows", "phase_reuse_memory_keep",
+            "phase_reuse_current_available_count", "phase_reuse_current_selected_count",
+            "phase_reuse_history_budget", "phase_reuse_exact_available_count",
+            "phase_reuse_partial_available_count", "phase_reuse_exact_selected_count",
+            "phase_reuse_partial_selected_count", "phase_reuse_global_selected_count",
+            "phase_reuse_total_selected_count", "phase_reuse_component_threshold",
+            "phase_reuse_taskmix_min_sim", "phase_reuse_overall_sim_threshold",
+            "phase_reuse_taskmix_weight", "phase_reuse_similar_initial_cap",
+            "phase_reuse_similar_decay_end", "phase_reuse_intensity_only_rejected_count",
+            "phase_reuse_taskmix_gate_rejected_count", "phase_reuse_overall_similarity_mean",
+            "phase_reuse_overall_similarity_max", "phase_reuse_archive_scene_count",
+            "phase_reuse_archive_rows_total", "phase_reuse_policy",
+            "phase_reuse_external_signature_source",
+            "phase_reuse_target_reference_ready", "phase_reuse_reference_aligned_labels",
+            "phase_reuse_novel_global_fallback_enabled", "phase_reuse_unrelated_global_fallback_enabled",
+            "phase_reuse_similar_fill_target_enabled", "phase_reuse_exact_use_similar_fallback",
+            "phase_reuse_internal_hard_gate_enabled", "phase_reuse_internal_hard_gate_threshold",
+            "phase_reuse_internal_hard_gate_rejected_count", "phase_reuse_similar_training_target_enabled",
+            "phase_reuse_similar_training_target",
+            "phase_reuse_similar_transfer_weight_mean", "phase_reuse_similar_transfer_weight_min",
+            "phase_reuse_similar_transfer_weight_max", "phase_reuse_weighted_effective_samples",
+            "phase_reference_reuse_mode", "phase_reference_candidate_signature",
+            "history_target_reference_id", "history_reference_mismatch_count",
+            "history_relabelled_count", "history_relabel_delta_mean", "history_relabel_delta_max_abs",
+            "phase_reference_probe_used", "phase_reference_probe_phase_id",
+            "phase_reference_probe_phase_name", "phase_reference_probe_phase_iter",
+            "phase_reference_probe_source", "phase_reference_probe_target_signature",
+            "phase_reference_probe_candidate_signature",
             "context_selection_source_pool", "elite_selection_source_pool", "tr_anchor_source_pool",
             "selected_candidate_source", "selected_candidate_mu", "selected_candidate_sigma",
             "selected_candidate_acq", "selected_candidate_score", "selected_candidate_beta_eff",
@@ -2048,13 +2355,20 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "sigma_calibrated", "sigma_acq", "sigma_calibration_use_in_acq",
             "sigma_calibration_eta", "sigma_acq_formula",
             "adaptive_scene_key", "adaptive_exploration_demand", "adaptive_exploration_target",
+            "adaptive_phase_relation", "adaptive_sample_target",
             "adaptive_beta", "adaptive_eta", "adaptive_data_need", "adaptive_data_need_linear",
+            "adaptive_forced_reexplore_need",
             "adaptive_reexplore_need", "adaptive_reexplore_gain", "adaptive_stagnation",
             "adaptive_uncertainty_need", "adaptive_safety_factor", "adaptive_dynamic_risk", "adaptive_effective_samples",
             "adaptive_progress_rate", "adaptive_risk_reason", "adaptive_risk_backlog",
             "adaptive_risk_unfinished", "adaptive_risk_unfinished_trend", "adaptive_risk_max_util",
             "adaptive_plausible_margin", "adaptive_plausible_fraction", "adaptive_plausible_margin_mult",
             "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
+            "transfer_noise_enabled", "transfer_noise_learn_base", "transfer_noise_mode",
+            "transfer_weight_mean", "transfer_weight_min", "transfer_weight_max",
+            "transfer_extra_noise_std_mean", "transfer_extra_noise_std_max",
+            "transfer_learned_base_noise_var", "transfer_learned_base_noise_std",
+            "transfer_noise_std_mean", "transfer_noise_std_max",
             "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
             "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
             "prediction_guard_mode", "prediction_guard_enabled", "prediction_guard_history_count",
@@ -2067,7 +2381,12 @@ def _safebo_select_theta(agent, state=None, context=None, group_cfg=None):
             "prediction_guard_risk_margin", "prediction_guard_predicted_candidate_cost",
             "prediction_guard_incumbent_cost", "prediction_guard_predicted_improvement",
             "prediction_guard_fallback_source",
-            "residual_trigger", "condition_trigger", "radius_min_stuck_count",
+            "residual_condition_trigger", "residual_trigger", "residual_trigger_surprise", "residual_trigger_surprise_source",
+            "reexplore_phase_iter", "reexplore_phase_max_iter", "reexplore_phase_window_allowed",
+            "reexplore_relation", "reexplore_relation_allowed", "reexplore_consecutive_count",
+            "reexplore_consecutive_required", "reexplore_phase_trigger_count", "reexplore_phase_trigger_limit",
+            "reexplore_countdown_renew_blocked",
+            "condition_trigger", "radius_min_stuck_count",
             "force_explore_countdown", "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
             "cbo_history_denoise_mode", "cbo_history_denoise_k", "cbo_history_denoise_radius",
             "cbo_history_denoise_min_neighbors", "cbo_history_denoise_context_weight",
@@ -2213,11 +2532,25 @@ def _cbo_write_reference_if_needed(ref):
     if not out_path or not isinstance(ref, dict):
         return
     try:
+        delay_ref = float(ref.get("delay_ref", np.nan))
+        energy_ref = float(ref.get("energy_per_arrival_ref", ref.get("energy_ref", np.nan)))
+        if not (np.isfinite(delay_ref) and np.isfinite(energy_ref)):
+            return
         if os.path.dirname(out_path):
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
         key = ref.get("macro_context_key", _cbo_macro_context_key())
+        existing = {}
+        if os.path.exists(out_path):
+            try:
+                with open(out_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict):
+                    existing = dict(payload)
+            except Exception:
+                existing = {}
+        existing[str(key)] = ref
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({key: ref}, f, ensure_ascii=False, indent=2)
+            json.dump(existing, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -2328,6 +2661,15 @@ def _cbo_publish_source_reference(ref, signature, phase, source_key):
     out["phase_reference_warmup_rounds"] = int(getattr(CFG, "CBO_SHARED_REFERENCE_WARMUP_ROUNDS", getattr(CFG, "CBO_REFERENCE_MIN_ROUNDS", 5)))
     out["phase_reference_freeze_policy"] = "freeze_after_cbo_warmup"
     if isinstance(phase, dict):
+        probs = dict(phase.get("task_probs", {}) or {})
+        rt = float(phase.get("rt_prob", probs.get("RT", 0.0)) or 0.0)
+        batch = float(phase.get("batch_prob", probs.get("Batch", 0.0)) or 0.0)
+        ai = float(phase.get("ai_prob", probs.get("AI", 0.0)) or 0.0)
+        lam = float(phase.get("lambda", 0.0) or 0.0)
+        out["macro_context_key"] = (
+            f"lambda_{lam:.6g}_mix_{int(round(rt * 100))}_"
+            f"{int(round(batch * 100))}_{int(round(ai * 100))}"
+        )
         out.setdefault("phase_id", phase.get("phase_id"))
         out.setdefault("phase_name", phase.get("phase_name", ""))
         out.setdefault("phase_signature_basis", phase.get("phase_signature_basis", {}))
@@ -2444,7 +2786,19 @@ def _cbo_metric_reference_patch(factory, metrics):
     )
     cached_ref, cached_phase, cached_signature, cached_status = _cbo_metric_reference_from_cache(factory)
 
-    shared_ref = cached_ref if isinstance(cached_ref, dict) else getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE", None)
+    exact_only_dynamic_reference = (
+        bool(getattr(CFG, "DYNAMIC_SCENARIO_ACTIVE", False))
+        and str(getattr(CFG, "PHASE_REFERENCE_REUSE_MODE", "significant_external")).strip().lower() == "exact_only"
+        and bool(active_phase_signature)
+    )
+    if isinstance(cached_ref, dict):
+        shared_ref = cached_ref
+    elif exact_only_dynamic_reference:
+        # A new external phase must calibrate its own reference. Falling back to
+        # the process-global reference would copy the previous phase scale.
+        shared_ref = None
+    else:
+        shared_ref = getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE", None)
     if shared_ref is None:
         shared_ref = getattr(CFG, "CBO_SHARED_SCENARIO_REFERENCE", None)
 
@@ -2660,6 +3014,105 @@ def _cbo_metric_reference_patch(factory, metrics):
         "bo_training_cost_source": "normalized_tradeoff_score" if objective_mode == "normalized_tradeoff" and np.isfinite(normalized_tradeoff_score) else "Eval_Cost_or_feedback_score",
     })
     return metrics
+
+
+def _cbo_dynamic_reference_for_phase_id(phase_id):
+    phase = None
+    try:
+        for item in list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or []):
+            if int(item.get("phase_id", -1)) == int(phase_id):
+                phase = dict(item)
+                break
+    except Exception:
+        phase = None
+    if not isinstance(phase, dict):
+        return None, None
+    signature = str(phase.get("phase_signature", phase.get("signature", "")))
+    cache = getattr(CFG, "SCENARIO_NORMALIZATION_REFERENCE_CACHE", None)
+    ref = cache.get(signature) if isinstance(cache, dict) and signature else None
+    return (dict(ref) if isinstance(ref, dict) else None), phase
+
+
+def _cbo_normalized_tradeoff_for_reference(metrics, ref):
+    if not isinstance(metrics, dict) or not isinstance(ref, dict):
+        return np.nan
+    eps = 1e-9
+    delay = _cbo_metric_float(metrics.get("window_delay_deadline_norm", metrics.get("avg_delay", np.nan)))
+    delay_ref = _cbo_metric_float(ref.get("delay_ref", np.nan))
+    delay_norm = _cbo_metric_clip_ratio(delay / delay_ref) if np.isfinite(delay) and np.isfinite(delay_ref) and abs(delay_ref) > eps else np.nan
+
+    window_energy_norm = _cbo_metric_float(metrics.get("window_energy_norm", np.nan))
+    energy_norm_ref = _cbo_metric_float(ref.get("energy_norm_ref", np.nan))
+    energy_per_arrival = _cbo_metric_float(metrics.get("energy_per_arrival", metrics.get("window_energy_per_arrival", np.nan)))
+    energy_ref = _cbo_metric_float(ref.get("energy_per_arrival_ref", np.nan))
+    if np.isfinite(window_energy_norm) and np.isfinite(energy_norm_ref) and abs(energy_norm_ref) > eps:
+        energy_norm = _cbo_metric_clip_ratio(window_energy_norm / energy_norm_ref)
+    elif np.isfinite(energy_per_arrival) and np.isfinite(energy_ref) and abs(energy_ref) > eps:
+        energy_norm = _cbo_metric_clip_ratio(energy_per_arrival / energy_ref)
+    else:
+        energy_norm = np.nan
+
+    unfinished_rate = _cbo_metric_float(metrics.get("unfinished_rate", metrics.get("window_unfinished_rate", 0.0)), 0.0)
+    success_rate = _cbo_metric_float(metrics.get("sla_success_rate", 1.0), 1.0)
+    target_success = float(getattr(CFG, "CBO_TARGET_SUCCESS_RATE", 0.995))
+    success_shortfall = max(0.0, target_success - success_rate)
+    success_shortfall_norm = success_shortfall / max(1.0 - target_success, eps)
+    backlog_growth_rate = _cbo_metric_float(metrics.get("backlog_growth_rate", metrics.get("window_backlog_growth_rate", 0.0)), 0.0)
+    backlog_growth_rate_ref = _cbo_metric_float(ref.get("backlog_growth_rate_ref", np.nan))
+    backlog_growth_norm = (
+        _cbo_metric_clip_ratio(backlog_growth_rate / backlog_growth_rate_ref, lo=0.0)
+        if np.isfinite(backlog_growth_rate_ref) and backlog_growth_rate_ref > eps else backlog_growth_rate
+    )
+    imbalance = _cbo_metric_float(metrics.get("class_imbalance_penalty", 0.0), 0.0)
+    if not np.isfinite(delay_norm) or not np.isfinite(energy_norm):
+        return np.nan
+    service_norm = float(delay_norm)
+    service_norm += float(getattr(CFG, "CBO_UNFINISHED_PENALTY_WEIGHT", 5.0)) * unfinished_rate
+    service_norm += float(getattr(CFG, "CBO_SUCCESS_SHORTFALL_WEIGHT", 2.0)) * success_shortfall_norm
+    service_norm += float(getattr(CFG, "CBO_BACKLOG_GROWTH_PENALTY_WEIGHT", 0.0)) * backlog_growth_norm
+    service_norm += float(getattr(CFG, "CBO_CLASS_IMBALANCE_WEIGHT", 0.0)) * imbalance
+    alpha = float(np.clip(
+        float(getattr(CFG, "CBO_TRADEOFF_ALPHA", 0.8)),
+        float(getattr(CFG, "CBO_ALPHA_MIN", 0.6)),
+        float(getattr(CFG, "CBO_ALPHA_MAX", 0.95)),
+    ))
+    return float(alpha * service_norm + (1.0 - alpha) * energy_norm)
+
+
+def _cbo_relabel_records_to_reference(records, target_ref):
+    out = []
+    relabelled = 0
+    mismatch = 0
+    deltas = []
+    target_id = str((target_ref or {}).get("reference_id", ""))
+    for record in list(records or []):
+        rec = dict(record)
+        metrics = dict(rec.get("metrics", {}) or {})
+        source_id = str(metrics.get("active_reference_id", metrics.get("scenario_reference_name", "")) or "")
+        score = _cbo_normalized_tradeoff_for_reference(metrics, target_ref)
+        if source_id and target_id and source_id != target_id:
+            mismatch += 1
+        if np.isfinite(score):
+            old_cost = _cbo_record_cost(rec)
+            rec["_cbo_original_y"] = rec.get("y")
+            rec["_cbo_original_cost"] = float(old_cost) if np.isfinite(old_cost) else np.nan
+            rec["y"] = -float(score)
+            rec["feedback_cost"] = float(score)
+            rec["_cbo_history_relabelled"] = True
+            rec["_cbo_source_reference_id"] = source_id
+            rec["_cbo_target_reference_id"] = target_id
+            if np.isfinite(old_cost):
+                deltas.append(float(score) - float(old_cost))
+            relabelled += 1
+        out.append(rec)
+    stats = {
+        "history_target_reference_id": target_id,
+        "history_reference_mismatch_count": int(mismatch),
+        "history_relabelled_count": int(relabelled),
+        "history_relabel_delta_mean": float(np.mean(deltas)) if deltas else 0.0,
+        "history_relabel_delta_max_abs": float(np.max(np.abs(deltas))) if deltas else 0.0,
+    }
+    return out, stats
 
 
 def _cbo_log_reference_fields(perf_log, metrics):
@@ -4047,6 +4500,65 @@ def configure_refactor_agent(agent, group_cfg):
     agent.cbo_external_internal_topk = int(group_cfg.get("cbo_external_internal_topk", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_TOPK", 400)))
     agent.cbo_external_internal_min_rows = int(group_cfg.get("cbo_external_internal_min_rows", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_MIN_ROWS", 40)))
     agent.cbo_external_internal_recent_keep = int(group_cfg.get("cbo_external_internal_recent_keep", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_RECENT_KEEP", 20)))
+    agent.cbo_history_target_rows = int(group_cfg.get("cbo_history_target_rows", _cfg_cbo_int("CBO_HISTORY_TARGET_ROWS", 80)))
+    agent.cbo_history_similar_keep = int(group_cfg.get("cbo_history_similar_keep", _cfg_cbo_int("CBO_HISTORY_SIMILAR_KEEP", 16)))
+    agent.cbo_history_global_keep = int(group_cfg.get("cbo_history_global_keep", _cfg_cbo_int("CBO_HISTORY_GLOBAL_KEEP", 4)))
+    agent.cbo_history_global_max = int(group_cfg.get("cbo_history_global_max", _cfg_cbo_int("CBO_HISTORY_GLOBAL_MAX", 20)))
+    agent.cbo_phase_memory_keep = int(group_cfg.get("cbo_phase_memory_keep", _cfg_cbo_int("CBO_PHASE_MEMORY_KEEP", 10)))
+    agent.cbo_phase_component_sim_threshold = float(group_cfg.get("cbo_phase_component_sim_threshold", _cfg_cbo_float("CBO_PHASE_COMPONENT_SIM_THRESHOLD", 0.70)))
+    agent.cbo_phase_exact_intensity_tol = float(group_cfg.get("cbo_phase_exact_intensity_tol", _cfg_cbo_float("CBO_PHASE_EXACT_INTENSITY_TOL", 0.10)))
+    agent.cbo_phase_exact_taskmix_l1_tol = float(group_cfg.get("cbo_phase_exact_taskmix_l1_tol", _cfg_cbo_float("CBO_PHASE_EXACT_TASKMIX_L1_TOL", 0.06)))
+    agent.cbo_phase_taskmix_min_sim = float(group_cfg.get("cbo_phase_taskmix_min_sim", _cfg_cbo_float("CBO_PHASE_TASKMIX_MIN_SIM", 0.70)))
+    agent.cbo_phase_overall_sim_threshold = float(group_cfg.get("cbo_phase_overall_sim_threshold", _cfg_cbo_float("CBO_PHASE_OVERALL_SIM_THRESHOLD", 0.65)))
+    agent.cbo_phase_taskmix_weight = float(np.clip(group_cfg.get("cbo_phase_taskmix_weight", _cfg_cbo_float("CBO_PHASE_TASKMIX_WEIGHT", 0.75)), 0.0, 1.0))
+    agent.cbo_phase_similar_initial_cap = int(group_cfg.get("cbo_phase_similar_initial_cap", _cfg_cbo_int("CBO_PHASE_SIMILAR_INITIAL_CAP", 40)))
+    agent.cbo_phase_similar_decay_end = int(group_cfg.get("cbo_phase_similar_decay_end", _cfg_cbo_int("CBO_PHASE_SIMILAR_DECAY_END", 80)))
+    agent.cbo_phase_archive_per_scene = int(group_cfg.get("cbo_phase_archive_per_scene", _cfg_cbo_int("CBO_PHASE_ARCHIVE_PER_SCENE", 80)))
+    agent.cbo_history_relabel_to_active_reference = bool(group_cfg.get("cbo_history_relabel_to_active_reference", False))
+    agent.cbo_novel_global_fallback = bool(group_cfg.get("cbo_novel_global_fallback", True))
+    agent.cbo_unrelated_global_fallback = bool(group_cfg.get("cbo_unrelated_global_fallback", True))
+    agent.cbo_phase_similar_fill_target = bool(group_cfg.get("cbo_phase_similar_fill_target", False))
+    agent.cbo_exact_use_similar_fallback = bool(group_cfg.get("cbo_exact_use_similar_fallback", True))
+    agent.cbo_adaptive_use_weighted_phase_samples = bool(group_cfg.get("cbo_adaptive_use_weighted_phase_samples", False))
+    agent.cbo_similar_history_sample_weight = float(np.clip(group_cfg.get("cbo_similar_history_sample_weight", 0.5), 0.0, 1.0))
+    agent.cbo_transfer_noise_enabled = bool(group_cfg.get("cbo_transfer_noise_enabled", False))
+    agent.cbo_transfer_noise_learn_base = bool(group_cfg.get("cbo_transfer_noise_learn_base", False))
+    agent.cbo_transfer_weight_min = float(np.clip(group_cfg.get("cbo_transfer_weight_min", 0.20), 0.0, 1.0))
+    agent.cbo_transfer_weight_max = float(np.clip(group_cfg.get("cbo_transfer_weight_max", 0.90), agent.cbo_transfer_weight_min, 1.0))
+    agent.cbo_transfer_noise_floor = max(1e-6, float(group_cfg.get("cbo_transfer_noise_floor", 0.02)))
+    agent.cbo_transfer_noise_scale = max(0.0, float(group_cfg.get("cbo_transfer_noise_scale", 0.35)))
+    agent.cbo_transfer_noise_weight_ratio = bool(group_cfg.get("cbo_transfer_noise_weight_ratio", False))
+    agent.cbo_transfer_noise_ratio_scale = max(0.0, float(group_cfg.get("cbo_transfer_noise_ratio_scale", 0.75)))
+    agent.cbo_transfer_noise_ratio_cap = max(
+        agent.cbo_transfer_noise_floor,
+        float(group_cfg.get("cbo_transfer_noise_ratio_cap", 0.80)),
+    )
+    agent.cbo_similar_training_target_enabled = bool(group_cfg.get("cbo_similar_training_target_enabled", False))
+    agent.cbo_similar_training_target = max(1, int(group_cfg.get("cbo_similar_training_target", 45)))
+    agent.cbo_similar_internal_hard_gate = bool(group_cfg.get("cbo_similar_internal_hard_gate", False))
+    agent.cbo_similar_internal_hard_threshold = float(np.clip(
+        group_cfg.get("cbo_similar_internal_hard_threshold", agent.cbo_context_sim_threshold),
+        0.0,
+        1.0,
+    ))
+    agent.cbo_similar_prefer_recent = bool(group_cfg.get("cbo_similar_prefer_recent", False))
+    agent.cbo_adjacent_similar_full_trust = bool(group_cfg.get("cbo_adjacent_similar_full_trust", False))
+    agent.cbo_relation_sample_targets_enabled = bool(group_cfg.get("cbo_relation_sample_targets_enabled", False))
+    agent.cbo_exact_sample_target = max(1, int(group_cfg.get("cbo_exact_sample_target", 80)))
+    agent.cbo_similar_sample_target = max(1, int(group_cfg.get("cbo_similar_sample_target", 45)))
+    agent.cbo_novel_sample_target = max(1, int(group_cfg.get("cbo_novel_sample_target", 80)))
+    agent.cbo_phase_reference_probe_rounds = max(0, int(group_cfg.get("cbo_phase_reference_probe_rounds", 0)))
+    agent.cbo_relation_aware_reexplore = bool(group_cfg.get("cbo_relation_aware_reexplore", False))
+    agent.cbo_reexplore_relations = {
+        item.strip().lower() for item in str(group_cfg.get("cbo_reexplore_relations", "similar,novel")).split(",") if item.strip()
+    }
+    agent.cbo_reexplore_consecutive_required = max(1, int(group_cfg.get("cbo_reexplore_consecutive_required", 2)))
+    agent.cbo_reexplore_max_triggers_per_phase = max(0, int(group_cfg.get("cbo_reexplore_max_triggers_per_phase", 1)))
+    agent.cbo_reexplore_no_renew_during_countdown = bool(group_cfg.get("cbo_reexplore_no_renew_during_countdown", True))
+    agent.cbo_reexplore_state_by_phase = dict(getattr(agent, "cbo_reexplore_state_by_phase", {}) or {})
+    agent.cbo_prediction_error_reexplore = bool(group_cfg.get("cbo_prediction_error_reexplore", getattr(CFG, "CBO_PREDICTION_ERROR_REEXPLORE", False)))
+    agent.cbo_prediction_error_reexplore_phase_max_iter = max(0, int(group_cfg.get("cbo_prediction_error_reexplore_phase_max_iter", 0)))
+    agent.cbo_external_intensity_max_diff = float(group_cfg.get("cbo_external_intensity_max_diff", _cfg_cbo_float("CBO_EXTERNAL_INTENSITY_MAX_DIFF", -1.0)))
     agent.cbo_external_gate_mode = str(group_cfg.get("cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) if agent.is_cbo_stability_enabled else "off").strip().lower()
     agent.cbo_external_gate_threshold = float(group_cfg.get("cbo_external_gate_threshold", _cfg_cbo_float("CBO_EXTERNAL_GATE_THRESHOLD", 0.35)))
     agent.cbo_external_gate_topk = int(group_cfg.get("cbo_external_gate_topk", _cfg_cbo_int("CBO_EXTERNAL_GATE_TOPK", 240)))
@@ -4226,6 +4738,17 @@ def agent_tell_with_feedback_meta(agent, theta, cost, state=None, context=None, 
                 if phase_id is not None:
                     rec["dynamic_phase_id"] = int(phase_id)
                     rec["dynamic_phase_name"] = str(phase_name)
+                    for phase in list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or []):
+                        if int(phase.get("phase_id", -1)) != int(phase_id):
+                            continue
+                        probs = phase.get("task_probs", {}) or {}
+                        rec["dynamic_external_signature"] = (
+                            f"lambda={float(phase.get('lambda')):.6g}|"
+                            f"mix={float(phase.get('rt_prob', probs.get('RT'))):.6g},"
+                            f"{float(phase.get('batch_prob', probs.get('Batch'))):.6g},"
+                            f"{float(phase.get('ai_prob', probs.get('AI'))):.6g}"
+                        )
+                        break
             except Exception:
                 pass
             try:
@@ -4291,6 +4814,9 @@ def _cbo_external_similarity(agent, current_external, rec):
             return 0.0
         a = a[:n]
         b = b[:n]
+        intensity_max_diff = float(getattr(agent, "cbo_external_intensity_max_diff", _cfg_cbo_float("CBO_EXTERNAL_INTENSITY_MAX_DIFF", -1.0)))
+        if n >= 1 and intensity_max_diff >= 0.0 and abs(float(a[0]) - float(b[0])) > intensity_max_diff:
+            return 0.0
         lengths = np.asarray([
             float(getattr(agent, "cbo_external_lengthscale_intensity", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_INTENSITY", 0.75))),
             float(getattr(agent, "cbo_external_lengthscale_taskmix", _cfg_cbo_float("CBO_EXTERNAL_LENGTHSCALE_TASKMIX", 0.25))),
@@ -4302,6 +4828,34 @@ def _cbo_external_similarity(agent, current_external, rec):
         return float(np.exp(-0.5 * float(np.dot(diff, diff))))
     except Exception:
         return 0.0
+
+
+def _cbo_external_component_similarities(agent, current_external, rec):
+    """Return separate arrival-intensity and task-mix similarities.
+
+    phase_adaptive_reuse deliberately uses OR semantics: matching either the
+    workload intensity or task mix is enough to provide weak transfer history.
+    """
+    rec_external = rec.get("external_context") if isinstance(rec, dict) else None
+    if current_external is None or rec_external is None:
+        return {"intensity": 0.0, "taskmix": 0.0, "intensity_diff": np.inf, "taskmix_l1": np.inf}
+    try:
+        a = np.asarray(list(current_external), dtype=float)
+        b = np.asarray(list(rec_external), dtype=float)
+        if len(a) < 4 or len(b) < 4:
+            return {"intensity": 0.0, "taskmix": 0.0, "intensity_diff": np.inf, "taskmix_l1": np.inf}
+        intensity_scale = max(1e-9, float(getattr(agent, "cbo_external_lengthscale_intensity", 0.75)))
+        taskmix_scale = max(1e-9, float(getattr(agent, "cbo_external_lengthscale_taskmix", 0.25)))
+        intensity_diff = abs(float(a[0]) - float(b[0]))
+        taskmix_delta = np.asarray(a[1:4] - b[1:4], dtype=float)
+        return {
+            "intensity": float(np.exp(-0.5 * (intensity_diff / intensity_scale) ** 2)),
+            "taskmix": float(np.exp(-0.5 * float(np.dot(taskmix_delta / taskmix_scale, taskmix_delta / taskmix_scale)))),
+            "intensity_diff": float(intensity_diff),
+            "taskmix_l1": float(np.sum(np.abs(taskmix_delta))),
+        }
+    except Exception:
+        return {"intensity": 0.0, "taskmix": 0.0, "intensity_diff": np.inf, "taskmix_l1": np.inf}
 
 
 def _cbo_external_gate_records(agent, records, recent_window=None, min_keep=None):
@@ -4516,6 +5070,93 @@ def _cbo_dynamic_phase_for_iter(bo_iter):
     except Exception:
         pass
     return None, ""
+
+
+def _cbo_dynamic_phase_position_for_iter(bo_iter):
+    """Return phase identity and one-based position for a zero-based BO iteration."""
+    try:
+        it = int(bo_iter) + 1
+        for p in list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or []):
+            start = int(p.get("iter_start", -1))
+            end = int(p.get("iter_end", -2))
+            if start <= it <= end:
+                return (
+                    int(p.get("phase_id", -1)),
+                    str(p.get("phase_name", "")),
+                    int(it - start + 1),
+                )
+    except Exception:
+        pass
+    return None, "", None
+
+
+def _cbo_phase_reference_probe_theta(agent):
+    probe_rounds = max(0, int(getattr(agent, "cbo_phase_reference_probe_rounds", 0)))
+    if probe_rounds <= 0:
+        return None, {}
+    bo_iter = int(getattr(agent, "_active_bo_iter", max(0, int(getattr(agent, "step_count", 0)))))
+    phase_id, phase_name, phase_iter = _cbo_dynamic_phase_position_for_iter(bo_iter)
+    if phase_id is None or phase_iter is None or int(phase_iter) > probe_rounds:
+        return None, {}
+    target_ref, phase = _cbo_dynamic_reference_for_phase_id(phase_id)
+    if isinstance(target_ref, dict):
+        return None, {}
+    if not isinstance(phase, dict):
+        return None, {}
+    base_phase_id = phase.get("phase_signature_base_phase_id", phase_id)
+    try:
+        if int(base_phase_id) != int(phase_id):
+            return None, {}
+    except Exception:
+        return None, {}
+    anchors = [list(x) for x in list(getattr(agent, "anchor_points", []) or []) if x is not None]
+    if anchors:
+        theta = list(anchors[(int(phase_iter) - 1) % len(anchors)])
+        source = "fixed_anchor"
+    else:
+        theta = list(agent._sample_in_bounds(agent.bounds[0].tolist(), agent.bounds[1].tolist()))
+        source = "random_probe"
+    return theta, {
+        "phase_reference_probe_used": 1,
+        "phase_reference_probe_phase_id": int(phase_id),
+        "phase_reference_probe_phase_name": str(phase_name),
+        "phase_reference_probe_phase_iter": int(phase_iter),
+        "phase_reference_probe_source": source,
+        "phase_reference_probe_target_signature": str(phase.get("phase_signature", "")),
+        "phase_reference_probe_candidate_signature": str(phase.get("phase_reference_candidate_signature", "")),
+        "phase_reuse_relation": "reference_probe",
+        "phase_reuse_target_reference_ready": False,
+        "phase_reuse_current_selected_count": 0,
+        "phase_reuse_exact_selected_count": 0,
+        "phase_reuse_partial_selected_count": 0,
+        "phase_reuse_global_selected_count": 0,
+        "phase_reuse_total_selected_count": 0,
+        "history_reference_mismatch_count": 0,
+        "history_relabelled_count": 0,
+        "history_relabel_delta_mean": 0.0,
+        "history_relabel_delta_max_abs": 0.0,
+    }
+
+
+def _cbo_commit_phase_reference_probe(agent, theta, probe_debug):
+    agent.step_count += 1
+    agent.last_theta = list(theta)
+    agent.acq_history.append({
+        "step": int(agent.step_count),
+        "candidates": [list(theta)],
+        "acq_values": [],
+        "best_selected": list(theta),
+    })
+    agent.last_debug_info = {
+        **dict(getattr(agent, "last_history_debug", {}) or {}),
+        **dict(probe_debug or {}),
+        "step": int(agent.step_count),
+        "best_selected": list(theta),
+        "candidate_count": 1,
+        "selected_candidate_source": "phase_reference_probe",
+        "selected_reason": "phase_reference_probe",
+    }
+    return list(theta)
 
 
 def _cbo_context_name_map(agent, context):
@@ -5007,7 +5648,7 @@ def _refactor_collect_samples(self, state=None):
     mode = str(getattr(self, "history_mode", _cfg_history_mode("all")) or "all").strip().lower()
     macro_mode = str(getattr(self, "cbo_macro_gate_mode", _cfg_cbo_str("CBO_MACRO_GATE_MODE", "off")) or "off").strip().lower()
     external_mode = str(getattr(self, "cbo_external_gate_mode", _cfg_cbo_str("CBO_EXTERNAL_GATE_MODE", "off")) or "off").strip().lower()
-    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel", "global_context_threshold", "external_internal_threshold"} or macro_mode != "off" or external_mode not in {"off", "none", "disabled"}
+    selector_requires_pool = select_mode in {"recent_context", "recent_context_elite", "hybrid", "state_gated_kernel", "global_context_threshold", "external_internal_threshold", "external_internal_decay", "phase_adaptive_reuse", "phase_hierarchical_reuse"} or macro_mode != "off" or external_mode not in {"off", "none", "disabled"}
     if mode in {"all", "legacy", "none"} and not selector_requires_pool:
         set_debug(records)
         return records
@@ -5015,7 +5656,18 @@ def _refactor_collect_samples(self, state=None):
     # 按插入顺序近似时间顺序。local_recent 本身已经是时间顺序，archive 在前，recent 在后。
     min_keep = max(2, int(getattr(self, "confidence_min_samples", _cfg_confidence_min_samples())))
     min_conf = float(getattr(self, "confidence_min", _cfg_confidence_min()))
-    records = _cbo_external_gate_records(self, records, recent_window=recent_window, min_keep=min_keep)
+    if select_mode in {"external_internal_threshold", "external_internal_decay", "phase_adaptive_reuse", "phase_hierarchical_reuse"}:
+        self._last_external_gate_debug = {
+            "external_gate_mode": external_mode,
+            "external_gate_enabled": False,
+            "external_gate_fallback_reason": "handled_by_external_internal_threshold",
+            "external_gate_raw_count": int(len(records)),
+            "external_gate_passed_count": int(len(records)),
+            "external_gate_selected_count": int(len(records)),
+            "external_gate_fallback_used": False,
+        }
+    else:
+        records = _cbo_external_gate_records(self, records, recent_window=recent_window, min_keep=min_keep)
 
     if select_mode == "state_gated_kernel":
         all_records = _cbo_external_gate_records(self, _cbo_all_records(self), recent_window=recent_window, min_keep=min_keep)
@@ -5162,6 +5814,596 @@ def _refactor_collect_samples(self, state=None):
             state_kernel_debug=state_debug,
         )
         return list(pool)
+
+    if select_mode in {"phase_adaptive_reuse", "phase_hierarchical_reuse"}:
+        hierarchical_reuse = select_mode == "phase_hierarchical_reuse"
+        raw_records = _cbo_all_records(self)
+        dedup = {}
+        for rec in raw_records:
+            dedup[_cbo_record_identity(self, rec)] = dict(rec)
+        all_records = list(dedup.values())
+        current_external = getattr(self, "_active_external_context", None)
+        target_rows = max(2, int(getattr(self, "cbo_history_target_rows", _cfg_cbo_int("CBO_HISTORY_TARGET_ROWS", 80))))
+        memory_keep = max(0, int(getattr(self, "cbo_phase_memory_keep", _cfg_cbo_int("CBO_PHASE_MEMORY_KEEP", 10))))
+        component_threshold = float(getattr(self, "cbo_phase_component_sim_threshold", _cfg_cbo_float("CBO_PHASE_COMPONENT_SIM_THRESHOLD", 0.70)))
+        exact_intensity_tol = max(0.0, float(getattr(self, "cbo_phase_exact_intensity_tol", _cfg_cbo_float("CBO_PHASE_EXACT_INTENSITY_TOL", 0.10))))
+        exact_taskmix_tol = max(0.0, float(getattr(self, "cbo_phase_exact_taskmix_l1_tol", _cfg_cbo_float("CBO_PHASE_EXACT_TASKMIX_L1_TOL", 0.06))))
+        taskmix_min_sim = float(getattr(self, "cbo_phase_taskmix_min_sim", _cfg_cbo_float("CBO_PHASE_TASKMIX_MIN_SIM", 0.70)))
+        overall_threshold = float(getattr(self, "cbo_phase_overall_sim_threshold", _cfg_cbo_float("CBO_PHASE_OVERALL_SIM_THRESHOLD", 0.65)))
+        taskmix_weight = float(np.clip(getattr(self, "cbo_phase_taskmix_weight", _cfg_cbo_float("CBO_PHASE_TASKMIX_WEIGHT", 0.75)), 0.0, 1.0))
+        similar_initial_cap = max(0, int(getattr(self, "cbo_phase_similar_initial_cap", _cfg_cbo_int("CBO_PHASE_SIMILAR_INITIAL_CAP", 40))))
+        similar_decay_end = max(1, int(getattr(self, "cbo_phase_similar_decay_end", _cfg_cbo_int("CBO_PHASE_SIMILAR_DECAY_END", 80))))
+        internal_threshold = float(getattr(self, "cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+        if internal_threshold <= 0.0:
+            internal_threshold = float(getattr(self, "cbo_global_context_sim_threshold", _cfg_cbo_float("CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70)))
+        similar_training_target_enabled = bool(getattr(self, "cbo_similar_training_target_enabled", False))
+        similar_training_target = max(1, int(getattr(self, "cbo_similar_training_target", 45)))
+        similar_internal_hard_gate = bool(getattr(self, "cbo_similar_internal_hard_gate", False))
+        similar_internal_hard_threshold = float(np.clip(
+            getattr(self, "cbo_similar_internal_hard_threshold", internal_threshold), 0.0, 1.0
+        ))
+
+        def record_phase_id(rec):
+            pid = rec.get("dynamic_phase_id") if isinstance(rec, dict) else None
+            if pid is None:
+                pid, _ = _cbo_dynamic_phase_for_iter(rec.get("bo_iter") if isinstance(rec, dict) else None)
+            try:
+                return int(pid) if pid is not None else None
+            except Exception:
+                return None
+
+        valid_iters = []
+        for rec in all_records:
+            try:
+                if rec.get("bo_iter") is not None:
+                    valid_iters.append(int(rec.get("bo_iter")))
+            except Exception:
+                pass
+        active_bo_iter = getattr(self, "_active_bo_iter", None)
+        current_bo_iter = int(active_bo_iter) if active_bo_iter is not None else (max(valid_iters) + 1 if valid_iters else 0)
+        current_phase_id, current_phase_name = _cbo_dynamic_phase_for_iter(current_bo_iter)
+
+        phase_plan_by_id = {}
+        for phase in list(getattr(CFG, "DYNAMIC_PHASE_PLAN", []) or []):
+            try:
+                phase_plan_by_id[int(phase.get("phase_id"))] = phase
+            except Exception:
+                continue
+
+        def stable_phase_external(phase_id, fallback):
+            """Use the detected phase signature, not a one-window Poisson sample.
+
+            The live arrival-rate estimate remains available to the scheduler,
+            while history transfer uses the stable external phase definition.
+            """
+            phase = phase_plan_by_id.get(phase_id)
+            if not isinstance(phase, dict):
+                return fallback
+            try:
+                return [
+                    float(phase.get("lambda")),
+                    float(phase.get("rt_prob", phase.get("task_probs", {}).get("RT"))),
+                    float(phase.get("batch_prob", phase.get("task_probs", {}).get("Batch"))),
+                    float(phase.get("ai_prob", phase.get("task_probs", {}).get("AI"))),
+                ]
+            except Exception:
+                return fallback
+
+        current_phase_external = stable_phase_external(current_phase_id, current_external)
+        target_reference, current_phase_plan = _cbo_dynamic_reference_for_phase_id(current_phase_id)
+        target_reference_ready = isinstance(target_reference, dict)
+        reference_aligned = bool(getattr(self, "cbo_history_relabel_to_active_reference", False))
+        novel_global_fallback = bool(getattr(self, "cbo_novel_global_fallback", True))
+        if current_phase_id is not None:
+            current_records = [dict(r) for r in all_records if record_phase_id(r) == int(current_phase_id)]
+            historical_records = [dict(r) for r in all_records if record_phase_id(r) != int(current_phase_id)]
+        else:
+            current_records = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-target_rows:]]
+            current_ids = {_cbo_record_identity(self, r) for r in current_records}
+            historical_records = [dict(r) for r in all_records if _cbo_record_identity(self, r) not in current_ids]
+        current_records.sort(key=lambda r: int(r.get("bo_iter", -1) or -1), reverse=True)
+
+        exact_records = []
+        partial_records = []
+        unrelated_records = []
+        intensity_only_rejected = 0
+        taskmix_gate_rejected = 0
+        internal_hard_gate_rejected = 0
+        adjacent_full_trust_candidates = 0
+        externally_similar_detected = False
+        overall_sims = []
+        for rec in historical_records:
+            rec2 = dict(rec)
+            rec_phase_id = record_phase_id(rec2)
+            rec_phase_external = stable_phase_external(rec_phase_id, rec2.get("external_context"))
+            phase_rec = dict(rec2)
+            phase_rec["external_context"] = rec_phase_external
+            parts = _cbo_external_component_similarities(self, current_phase_external, phase_rec)
+            sim_int = float(parts["intensity"])
+            sim_mix = float(parts["taskmix"])
+            sim_or = max(sim_int, sim_mix)
+            sim_overall = float(
+                max(sim_mix, 1e-12) ** taskmix_weight
+                * max(sim_int, 1e-12) ** (1.0 - taskmix_weight)
+            )
+            overall_sims.append(sim_overall)
+            rec2["_cbo_external_similarity"] = sim_overall if hierarchical_reuse else sim_or
+            rec2["_cbo_external_intensity_similarity"] = sim_int
+            rec2["_cbo_external_taskmix_similarity"] = sim_mix
+            rec2["_cbo_external_overall_similarity"] = sim_overall
+            rec2["_cbo_context_similarity"] = float(_cbo_context_similarity(self, context, rec2))
+            is_exact = parts["intensity_diff"] <= exact_intensity_tol and parts["taskmix_l1"] <= exact_taskmix_tol
+            if is_exact:
+                rec2["_cbo_phase_reuse_class"] = "exact"
+                rec2["_cbo_transfer_weight"] = 1.0
+                exact_records.append(rec2)
+            elif hierarchical_reuse and sim_mix >= taskmix_min_sim and sim_overall >= overall_threshold:
+                externally_similar_detected = True
+                internal_similarity = float(rec2.get("_cbo_context_similarity", 0.0))
+                if similar_internal_hard_gate and internal_similarity < similar_internal_hard_threshold:
+                    internal_hard_gate_rejected += 1
+                    rec2["_cbo_phase_reuse_class"] = "similar_internal_rejected"
+                    unrelated_records.append(rec2)
+                else:
+                    rec2["_cbo_phase_reuse_class"] = "similar"
+                    adjacent_history = bool(
+                        getattr(self, "cbo_adjacent_similar_full_trust", False)
+                        and current_phase_id is not None
+                        and rec_phase_id is not None
+                        and int(rec_phase_id) == int(current_phase_id) - 1
+                    )
+                    rec2["_cbo_adjacent_similar_full_trust"] = adjacent_history
+                    if adjacent_history:
+                        # The immediately preceding phase preserves temporal
+                        # queue/state continuity.  Treat it like BO-recent:
+                        # full sample weight and therefore no transfer-only
+                        # noise inflation.
+                        rec2["_cbo_transfer_weight"] = 1.0
+                        adjacent_full_trust_candidates += 1
+                    else:
+                        transfer_weight = sim_overall * internal_similarity
+                        rec2["_cbo_transfer_weight"] = float(np.clip(
+                            transfer_weight,
+                            getattr(self, "cbo_transfer_weight_min", 0.20),
+                            getattr(self, "cbo_transfer_weight_max", 0.90),
+                        ))
+                    partial_records.append(rec2)
+            elif (not hierarchical_reuse) and sim_or >= component_threshold:
+                rec2["_cbo_phase_reuse_class"] = "partial"
+                partial_records.append(rec2)
+            else:
+                if hierarchical_reuse and sim_int >= component_threshold and sim_mix < taskmix_min_sim:
+                    intensity_only_rejected += 1
+                    rec2["_cbo_phase_reuse_class"] = "intensity_only_rejected"
+                else:
+                    if hierarchical_reuse and sim_mix < taskmix_min_sim:
+                        taskmix_gate_rejected += 1
+                    rec2["_cbo_phase_reuse_class"] = "global"
+                unrelated_records.append(rec2)
+
+        def history_rank(rec):
+            return (
+                float(rec.get("_cbo_context_similarity", 0.0)) >= internal_threshold,
+                float(rec.get("_cbo_context_similarity", 0.0)),
+                float(rec.get("_cbo_external_similarity", 0.0)),
+                int(rec.get("bo_iter", -1) or -1),
+            )
+
+        exact_records.sort(key=history_rank, reverse=True)
+        if bool(getattr(self, "cbo_similar_prefer_recent", False)):
+            # For an adjacent similar phase, temporal continuity is often a
+            # stronger prior than retrieving older globally similar states.
+            partial_records.sort(
+                key=lambda rec: int(rec.get("bo_iter", -1) or -1),
+                reverse=True,
+            )
+        else:
+            partial_records.sort(key=history_rank, reverse=True)
+        current_selected = current_records[:target_rows]
+        for rec in current_selected:
+            rec["_cbo_transfer_weight"] = 1.0
+            rec["_cbo_phase_reuse_class"] = "current"
+        current_count = len(current_selected)
+        base_history_budget = max(0, target_rows - current_count)
+        relation = "exact" if exact_records else (
+            ("similar" if hierarchical_reuse else "partial")
+            if (partial_records or (hierarchical_reuse and externally_similar_detected))
+            else "novel"
+        )
+        if hierarchical_reuse and relation == "similar":
+            if similar_training_target_enabled:
+                # V33: similar history is only a cold-start bridge.  Current
+                # rows replace it one-for-one until the 45-row target is met.
+                similar_budget_cap = max(0, similar_training_target - current_count)
+            elif bool(getattr(self, "cbo_phase_similar_fill_target", False)):
+                similar_budget_cap = int(base_history_budget)
+            else:
+                decay_fraction = max(0.0, 1.0 - float(current_count) / float(similar_decay_end))
+                similar_budget_cap = int(math.ceil(float(similar_initial_cap) * decay_fraction))
+            persistent_memory = 0
+            history_budget = min(base_history_budget, similar_budget_cap)
+        else:
+            persistent_memory = (
+                min(memory_keep, max(0, current_count - max(0, target_rows - memory_keep)))
+                if (not hierarchical_reuse or relation == "exact")
+                else 0
+            )
+            history_budget = base_history_budget + persistent_memory
+        if reference_aligned and not target_reference_ready:
+            history_budget = 0
+            persistent_memory = 0
+        if hierarchical_reuse and relation == "novel" and not novel_global_fallback:
+            history_budget = 0
+            persistent_memory = 0
+
+        merged = []
+        selected_ids = set()
+
+        def add_block(priority, block, limit=None):
+            added = 0
+            for rec in block:
+                if limit is not None and added >= max(0, int(limit)):
+                    break
+                key = _cbo_record_identity(self, rec)
+                if key in selected_ids:
+                    continue
+                rec2 = dict(rec)
+                rec2["_cbo_select_priority"] = int(priority)
+                rec2.setdefault("_cbo_context_similarity", float(_cbo_context_similarity(self, context, rec2)))
+                merged.append(rec2)
+                selected_ids.add(key)
+                added += 1
+            return added
+
+        current_added = add_block(0, current_selected, target_rows)
+        exact_added = add_block(1, exact_records, history_budget)
+        partial_limit = history_budget - exact_added
+        if relation == "exact" and not bool(getattr(self, "cbo_exact_use_similar_fallback", True)):
+            partial_limit = 0
+        partial_added = add_block(2, partial_records, partial_limit)
+        relevant_added = exact_added + partial_added
+
+        global_candidates = []
+        for rec in historical_records:
+            if _cbo_record_identity(self, rec) in selected_ids:
+                continue
+            rec2 = dict(rec)
+            rec_phase_id = record_phase_id(rec2)
+            rec_phase_external = stable_phase_external(rec_phase_id, rec2.get("external_context"))
+            phase_rec = dict(rec2)
+            phase_rec["external_context"] = rec_phase_external
+            parts = _cbo_external_component_similarities(self, current_phase_external, phase_rec)
+            sim_int = float(parts["intensity"])
+            sim_mix = float(parts["taskmix"])
+            sim_overall = float(
+                max(sim_mix, 1e-12) ** taskmix_weight
+                * max(sim_int, 1e-12) ** (1.0 - taskmix_weight)
+            )
+            rec2["_cbo_external_similarity"] = sim_overall if hierarchical_reuse else max(sim_int, sim_mix)
+            rec2["_cbo_external_overall_similarity"] = sim_overall
+            rec2["_cbo_context_similarity"] = float(_cbo_context_similarity(self, context, rec2))
+            rec2["_cbo_phase_reuse_class"] = "global"
+            global_candidates.append(rec2)
+        # A novel phase falls back to BO-recent behavior instead of sparse GP data.
+        global_candidates.sort(key=lambda r: int(r.get("bo_iter", -1) or -1), reverse=True)
+        global_limit = history_budget - relevant_added
+        unrelated_global_fallback = bool(getattr(self, "cbo_unrelated_global_fallback", True))
+        if hierarchical_reuse and (
+            (relation == "novel" and not novel_global_fallback)
+            or (reference_aligned and not unrelated_global_fallback)
+        ):
+            global_limit = 0
+        global_added = add_block(3, global_candidates, global_limit)
+
+        merged.sort(key=lambda r: (
+            int(r.get("_cbo_select_priority", 9)),
+            -float(r.get("_cbo_context_similarity", 0.0)),
+            -int(r.get("bo_iter", -1) or -1),
+        ))
+        selected_external = [float(r.get("_cbo_external_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_external_similarity", np.nan)))]
+        selected_internal = [float(r.get("_cbo_context_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_context_similarity", np.nan)))]
+        phase_archive_buckets = [
+            bucket for key, bucket in getattr(self, "local_archive", {}).items()
+            if isinstance(key, tuple) and len(key) >= 2 and key[0] == "EXTERNAL_PHASE"
+        ]
+        relabel_debug = {
+            "history_target_reference_id": str((target_reference or {}).get("reference_id", "")),
+            "history_reference_mismatch_count": 0,
+            "history_relabelled_count": 0,
+            "history_relabel_delta_mean": 0.0,
+            "history_relabel_delta_max_abs": 0.0,
+        }
+        if reference_aligned and target_reference_ready:
+            merged, relabel_debug = _cbo_relabel_records_to_reference(merged, target_reference)
+        selected_partial_weights = [
+            float(rec.get("_cbo_transfer_weight", getattr(self, "cbo_similar_history_sample_weight", 0.5)))
+            for rec in merged if rec.get("_cbo_phase_reuse_class") == "similar"
+        ]
+        selected_adjacent_full_trust = sum(
+            1 for rec in merged if bool(rec.get("_cbo_adjacent_similar_full_trust", False))
+        )
+        weighted_effective_samples = float(current_added + exact_added + sum(selected_partial_weights))
+        reuse_debug = {
+            "external_internal_threshold_enabled": True,
+            "external_internal_external_threshold": float(component_threshold),
+            "external_internal_internal_threshold": float(internal_threshold),
+            "external_internal_external_topk": int(len(historical_records)),
+            "external_internal_context_k": int(history_budget),
+            "external_internal_min_rows": int(target_rows),
+            "external_internal_external_min_rows": 0,
+            "external_internal_recent_keep": int(target_rows),
+            "external_internal_weak_fallback_k": int(history_budget),
+            "external_internal_raw_records": int(len(all_records)),
+            "external_internal_external_passed_count": int(len(exact_records) + len(partial_records)),
+            "external_internal_external_pool_count": int(len(exact_records) + len(partial_records)),
+            "external_internal_internal_scored_count": int(len(exact_records) + len(partial_records)),
+            "external_internal_internal_strong_count": int(sum(1 for r in exact_records + partial_records if float(r.get("_cbo_context_similarity", 0.0)) >= internal_threshold)),
+            "external_internal_internal_weak_count": int(sum(1 for r in exact_records + partial_records if float(r.get("_cbo_context_similarity", 0.0)) < internal_threshold)),
+            "external_internal_selected_strong_count": int(exact_added),
+            "external_internal_selected_weak_count": int(partial_added),
+            "external_internal_selected_recent_count": int(current_added),
+            "external_internal_final_fallback_count": int(global_added),
+            "external_internal_fallback_used": bool(global_added > 0),
+            "external_internal_external_fallback_used": bool(global_added > 0),
+            "external_internal_external_fallback_reason": "recent_global_fill" if global_added > 0 else "",
+            "external_internal_selected_external_similarity_mean": float(np.nanmean(selected_external)) if selected_external else np.nan,
+            "external_internal_selected_external_similarity_min": float(np.nanmin(selected_external)) if selected_external else np.nan,
+            "external_internal_selected_internal_similarity_mean": float(np.nanmean(selected_internal)) if selected_internal else np.nan,
+            "external_internal_selected_internal_similarity_min": float(np.nanmin(selected_internal)) if selected_internal else np.nan,
+            "external_internal_selected_phase_counts": _cbo_phase_counts_string(merged),
+            "phase_reuse_relation": relation,
+            "phase_reuse_current_bo_iter": int(current_bo_iter),
+            "phase_reuse_current_phase_id": int(current_phase_id) if current_phase_id is not None else None,
+            "phase_reuse_current_phase_name": str(current_phase_name),
+            "phase_reuse_target_rows": int(target_rows),
+            "phase_reuse_memory_keep": int(memory_keep),
+            "phase_reuse_current_available_count": int(len(current_records)),
+            "phase_reuse_current_selected_count": int(current_added),
+            "phase_reuse_history_budget": int(history_budget),
+            "phase_reuse_exact_available_count": int(len(exact_records)),
+            "phase_reuse_partial_available_count": int(len(partial_records)),
+            "phase_reuse_exact_selected_count": int(exact_added),
+            "phase_reuse_partial_selected_count": int(partial_added),
+            "phase_reuse_global_selected_count": int(global_added),
+            "phase_reuse_total_selected_count": int(len(merged)),
+            "phase_reuse_component_threshold": float(component_threshold),
+            "phase_reuse_taskmix_min_sim": float(taskmix_min_sim),
+            "phase_reuse_overall_sim_threshold": float(overall_threshold),
+            "phase_reuse_taskmix_weight": float(taskmix_weight),
+            "phase_reuse_similar_initial_cap": int(similar_initial_cap),
+            "phase_reuse_similar_decay_end": int(similar_decay_end),
+            "phase_reuse_intensity_only_rejected_count": int(intensity_only_rejected),
+            "phase_reuse_taskmix_gate_rejected_count": int(taskmix_gate_rejected),
+            "phase_reuse_internal_hard_gate_enabled": bool(similar_internal_hard_gate),
+            "phase_reuse_internal_hard_gate_threshold": float(similar_internal_hard_threshold),
+            "phase_reuse_internal_hard_gate_rejected_count": int(internal_hard_gate_rejected),
+            "phase_reuse_similar_training_target_enabled": bool(similar_training_target_enabled),
+            "phase_reuse_similar_training_target": int(similar_training_target),
+            "phase_reuse_similar_prefer_recent": bool(getattr(self, "cbo_similar_prefer_recent", False)),
+            "phase_reuse_adjacent_similar_full_trust_enabled": bool(getattr(self, "cbo_adjacent_similar_full_trust", False)),
+            "phase_reuse_adjacent_similar_full_trust_candidates": int(adjacent_full_trust_candidates),
+            "phase_reuse_adjacent_similar_full_trust_selected": int(selected_adjacent_full_trust),
+            "phase_reuse_overall_similarity_mean": float(np.nanmean(overall_sims)) if overall_sims else np.nan,
+            "phase_reuse_overall_similarity_max": float(np.nanmax(overall_sims)) if overall_sims else np.nan,
+            "phase_reuse_archive_scene_count": int(len(phase_archive_buckets)),
+            "phase_reuse_archive_rows_total": int(sum(len(bucket) for bucket in phase_archive_buckets)),
+            "phase_reuse_policy": "taskmix_required_overall" if hierarchical_reuse else "component_or",
+            "phase_reuse_external_signature_source": "dynamic_phase_plan" if current_phase_id in phase_plan_by_id else "live_external_context",
+            "phase_reuse_target_reference_ready": bool(target_reference_ready),
+            "phase_reuse_reference_aligned_labels": bool(reference_aligned),
+            "phase_reuse_novel_global_fallback_enabled": bool(novel_global_fallback),
+            "phase_reuse_unrelated_global_fallback_enabled": bool(unrelated_global_fallback),
+            "phase_reuse_similar_fill_target_enabled": bool(getattr(self, "cbo_phase_similar_fill_target", False)),
+            "phase_reuse_exact_use_similar_fallback": bool(getattr(self, "cbo_exact_use_similar_fallback", True)),
+            "phase_reuse_similar_transfer_weight_mean": float(np.mean(selected_partial_weights)) if selected_partial_weights else np.nan,
+            "phase_reuse_similar_transfer_weight_min": float(np.min(selected_partial_weights)) if selected_partial_weights else np.nan,
+            "phase_reuse_similar_transfer_weight_max": float(np.max(selected_partial_weights)) if selected_partial_weights else np.nan,
+            "phase_reuse_weighted_effective_samples": float(weighted_effective_samples),
+            "phase_reference_reuse_mode": str(getattr(CFG, "PHASE_REFERENCE_REUSE_MODE", "significant_external")),
+            "phase_reference_candidate_signature": str((current_phase_plan or {}).get("phase_reference_candidate_signature", "")),
+        }
+        reuse_debug.update(relabel_debug)
+        history_source = "phase_hierarchical_reuse" if hierarchical_reuse else "phase_adaptive_reuse"
+        set_debug(
+            merged,
+            recent_count=current_added,
+            context_count=relevant_added,
+            sims=[float(r.get("_cbo_context_similarity", 0.0)) for r in exact_records + partial_records],
+            context_selection_source_pool=history_source,
+            elite_selection_source_pool=history_source,
+            tr_anchor_source_pool=history_source,
+            state_kernel_debug=reuse_debug,
+        )
+        return list(merged)
+
+    if select_mode == "external_internal_decay":
+        all_records = _cbo_all_records(self)
+        current_external = getattr(self, "_active_external_context", None)
+        target_rows = max(2, int(getattr(self, "cbo_history_target_rows", _cfg_cbo_int("CBO_HISTORY_TARGET_ROWS", 80))))
+        similar_keep = max(0, min(target_rows, int(getattr(self, "cbo_history_similar_keep", _cfg_cbo_int("CBO_HISTORY_SIMILAR_KEEP", 16)))))
+        global_keep = max(0, min(target_rows, int(getattr(self, "cbo_history_global_keep", _cfg_cbo_int("CBO_HISTORY_GLOBAL_KEEP", 4)))))
+        global_max = max(global_keep, min(target_rows, int(getattr(self, "cbo_history_global_max", _cfg_cbo_int("CBO_HISTORY_GLOBAL_MAX", 20)))))
+        current_primary_limit = max(0, target_rows - similar_keep - global_keep)
+        external_threshold = float(getattr(self, "cbo_external_internal_sim_threshold", _cfg_cbo_float("CBO_EXTERNAL_INTERNAL_SIM_THRESHOLD", 0.75)))
+        external_topk = max(1, int(getattr(self, "cbo_external_internal_topk", _cfg_cbo_int("CBO_EXTERNAL_INTERNAL_TOPK", 400))))
+        internal_threshold = float(getattr(self, "cbo_context_sim_threshold", _cfg_cbo_float("CBO_CONTEXT_SIM_THRESHOLD", 0.0)))
+        if internal_threshold <= 0.0:
+            internal_threshold = float(getattr(self, "cbo_global_context_sim_threshold", _cfg_cbo_float("CBO_GLOBAL_CONTEXT_SIM_THRESHOLD", 0.70)))
+
+        def record_phase_id(rec):
+            pid = rec.get("dynamic_phase_id") if isinstance(rec, dict) else None
+            if pid is None:
+                pid, _ = _cbo_dynamic_phase_for_iter(rec.get("bo_iter") if isinstance(rec, dict) else None)
+            try:
+                return int(pid) if pid is not None else None
+            except Exception:
+                return None
+
+        valid_iters = []
+        for rec in all_records:
+            try:
+                if rec.get("bo_iter") is not None:
+                    valid_iters.append(int(rec.get("bo_iter")))
+            except Exception:
+                pass
+        active_bo_iter = getattr(self, "_active_bo_iter", None)
+        current_bo_iter = int(active_bo_iter) if active_bo_iter is not None else (max(valid_iters) + 1 if valid_iters else 0)
+        current_phase_id, current_phase_name = _cbo_dynamic_phase_for_iter(current_bo_iter)
+        if current_phase_id is not None:
+            current_records = [dict(r) for r in all_records if record_phase_id(r) == int(current_phase_id)]
+            historical_records = [dict(r) for r in all_records if record_phase_id(r) != int(current_phase_id)]
+        else:
+            current_records = [self._unpack_sample(s) for s in list(getattr(self, "local_recent", []))[-target_rows:]]
+            current_ids = {_cbo_record_identity(self, r) for r in current_records}
+            historical_records = [dict(r) for r in all_records if _cbo_record_identity(self, r) not in current_ids]
+        current_records.sort(key=lambda r: int(r.get("bo_iter", -1) or -1), reverse=True)
+
+        external_scored = []
+        intensity_rejected = 0
+        intensity_max_diff = float(getattr(self, "cbo_external_intensity_max_diff", _cfg_cbo_float("CBO_EXTERNAL_INTENSITY_MAX_DIFF", -1.0)))
+        for rec in historical_records:
+            rec2 = dict(rec)
+            sim_ext = float(_cbo_external_similarity(self, current_external, rec2))
+            rec2["_cbo_external_similarity"] = sim_ext
+            try:
+                rec_ext = rec2.get("external_context")
+                if current_external is not None and rec_ext is not None and intensity_max_diff >= 0.0:
+                    if abs(float(current_external[0]) - float(rec_ext[0])) > intensity_max_diff:
+                        intensity_rejected += 1
+            except Exception:
+                pass
+            external_scored.append((sim_ext, int(rec2.get("bo_iter", -1) or -1), rec2))
+        external_scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        external_passed = [r for sim, _, r in external_scored if sim >= external_threshold]
+        external_pool = external_passed[:external_topk]
+
+        internal_scored = []
+        for rec in external_pool:
+            rec2 = dict(rec)
+            sim_int = float(_cbo_context_similarity(self, context, rec2))
+            rec2["_cbo_context_similarity"] = sim_int
+            internal_scored.append((sim_int, int(rec2.get("bo_iter", -1) or -1), rec2))
+        internal_scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        strong_history = [r for sim, _, r in internal_scored if sim >= internal_threshold]
+        weak_history = [r for sim, _, r in internal_scored if sim < internal_threshold]
+
+        merged = []
+        selected_ids = set()
+
+        def add_block(priority, block, limit=None):
+            added = 0
+            for rec in block:
+                if limit is not None and added >= max(0, int(limit)):
+                    break
+                key = _cbo_record_identity(self, rec)
+                if key in selected_ids:
+                    continue
+                rec2 = dict(rec)
+                rec2["_cbo_select_priority"] = int(priority)
+                rec2["_cbo_external_similarity"] = float(rec2.get("_cbo_external_similarity", _cbo_external_similarity(self, current_external, rec2)))
+                rec2["_cbo_context_similarity"] = float(rec2.get("_cbo_context_similarity", _cbo_context_similarity(self, context, rec2)))
+                merged.append(rec2)
+                selected_ids.add(key)
+                added += 1
+            return added
+
+        current_primary_added = add_block(0, current_records, current_primary_limit)
+        similar_budget = max(similar_keep, target_rows - current_primary_added - global_keep)
+        similar_budget = min(similar_budget, max(0, target_rows - current_primary_added))
+        strong_added = add_block(1, strong_history, similar_budget)
+        weak_added = add_block(2, weak_history, similar_budget - strong_added)
+        similar_added = strong_added + weak_added
+
+        current_extra_budget = max(0, target_rows - global_keep - len(merged))
+        current_extra_added = add_block(0, current_records[current_primary_added:], current_extra_budget)
+
+        global_scored = []
+        for rec in historical_records:
+            if _cbo_record_identity(self, rec) in selected_ids:
+                continue
+            rec2 = dict(rec)
+            sim_int = float(_cbo_context_similarity(self, context, rec2))
+            rec2["_cbo_context_similarity"] = sim_int
+            rec2["_cbo_external_similarity"] = float(_cbo_external_similarity(self, current_external, rec2))
+            global_scored.append((sim_int, int(rec2.get("bo_iter", -1) or -1), rec2))
+        global_scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        global_candidates = [r for _, _, r in global_scored]
+        missing_after_local = max(0, target_rows - len(merged))
+        global_budget = min(global_max, max(global_keep, missing_after_local))
+        global_added = add_block(3, global_candidates, min(global_budget, missing_after_local))
+        final_current_added = add_block(0, current_records, max(0, target_rows - len(merged)))
+
+        merged.sort(key=lambda r: (
+            int(r.get("_cbo_select_priority", 9)),
+            -int(r.get("bo_iter", -1) or -1) if int(r.get("_cbo_select_priority", 9)) == 0 else 0,
+            -float(np.nan_to_num(r.get("_cbo_external_similarity", 0.0), nan=0.0)),
+            -float(np.nan_to_num(r.get("_cbo_context_similarity", 0.0), nan=0.0)),
+        ))
+        external_sims = [float(s) for s, _, _ in external_scored]
+        internal_sims = [float(s) for s, _, _ in internal_scored]
+        selected_external_sims = [float(r.get("_cbo_external_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_external_similarity", np.nan)))]
+        selected_internal_sims = [float(r.get("_cbo_context_similarity", np.nan)) for r in merged if np.isfinite(float(r.get("_cbo_context_similarity", np.nan)))]
+        decay_debug = {
+            "external_internal_threshold_enabled": True,
+            "external_internal_external_threshold": float(external_threshold),
+            "external_internal_internal_threshold": float(internal_threshold),
+            "external_internal_external_topk": int(external_topk),
+            "external_internal_context_k": int(target_rows),
+            "external_internal_min_rows": int(target_rows),
+            "external_internal_external_min_rows": 0,
+            "external_internal_recent_keep": int(current_primary_limit),
+            "external_internal_weak_fallback_k": int(max(0, similar_budget - strong_added)),
+            "external_internal_raw_records": int(len(all_records)),
+            "external_internal_external_passed_count": int(len(external_passed)),
+            "external_internal_external_pool_count": int(len(external_pool)),
+            "external_internal_internal_scored_count": int(len(internal_scored)),
+            "external_internal_internal_strong_count": int(sum(1 for sim, _, _ in internal_scored if sim >= internal_threshold)),
+            "external_internal_internal_weak_count": int(sum(1 for sim, _, _ in internal_scored if sim < internal_threshold)),
+            "external_internal_selected_strong_count": int(strong_added),
+            "external_internal_selected_weak_count": int(weak_added),
+            "external_internal_selected_recent_count": int(current_primary_added + current_extra_added + final_current_added),
+            "external_internal_final_fallback_count": int(global_added),
+            "external_internal_fallback_used": bool(weak_added > 0 or global_added > global_keep),
+            "external_internal_external_fallback_used": False,
+            "external_internal_external_fallback_reason": "",
+            "external_internal_external_similarity_max": float(np.nanmax(external_sims)) if external_sims else np.nan,
+            "external_internal_external_similarity_mean": float(np.nanmean(external_sims)) if external_sims else np.nan,
+            "external_internal_external_similarity_p50": float(np.nanpercentile(external_sims, 50)) if external_sims else np.nan,
+            "external_internal_external_pool_similarity_mean": float(np.nanmean([r.get("_cbo_external_similarity", np.nan) for r in external_pool])) if external_pool else np.nan,
+            "external_internal_external_pool_similarity_min": float(np.nanmin([r.get("_cbo_external_similarity", np.nan) for r in external_pool])) if external_pool else np.nan,
+            "external_internal_internal_similarity_max": float(np.nanmax(internal_sims)) if internal_sims else np.nan,
+            "external_internal_internal_similarity_mean": float(np.nanmean(internal_sims)) if internal_sims else np.nan,
+            "external_internal_internal_similarity_p50": float(np.nanpercentile(internal_sims, 50)) if internal_sims else np.nan,
+            "external_internal_selected_external_similarity_mean": float(np.nanmean(selected_external_sims)) if selected_external_sims else np.nan,
+            "external_internal_selected_external_similarity_min": float(np.nanmin(selected_external_sims)) if selected_external_sims else np.nan,
+            "external_internal_selected_internal_similarity_mean": float(np.nanmean(selected_internal_sims)) if selected_internal_sims else np.nan,
+            "external_internal_selected_internal_similarity_min": float(np.nanmin(selected_internal_sims)) if selected_internal_sims else np.nan,
+            "external_internal_selected_phase_counts": _cbo_phase_counts_string(merged),
+            "decay_history_target_rows": int(target_rows),
+            "decay_history_current_phase_id": int(current_phase_id) if current_phase_id is not None else None,
+            "decay_history_current_phase_name": str(current_phase_name),
+            "decay_history_current_available_count": int(len(current_records)),
+            "decay_history_current_selected_count": int(current_primary_added + current_extra_added + final_current_added),
+            "decay_history_similar_budget": int(similar_budget),
+            "decay_history_similar_selected_count": int(similar_added),
+            "decay_history_global_selected_count": int(global_added),
+            "decay_history_similar_keep": int(similar_keep),
+            "decay_history_global_keep": int(global_keep),
+            "decay_history_global_max": int(global_max),
+            "decay_history_external_intensity_max_diff": float(intensity_max_diff),
+            "decay_history_intensity_rejected_count": int(intensity_rejected),
+        }
+        set_debug(
+            merged,
+            recent_count=current_primary_added + current_extra_added + final_current_added,
+            context_count=similar_added,
+            sims=internal_sims,
+            context_selection_source_pool="external_internal_decay",
+            elite_selection_source_pool="external_internal_decay",
+            tr_anchor_source_pool="external_internal_decay",
+            state_kernel_debug=decay_debug,
+        )
+        return list(merged)
 
     if select_mode == "external_internal_threshold":
         all_records = _cbo_all_records(self)
@@ -5865,17 +7107,26 @@ def _stability_tell(self, theta, cost, state=None, context=None):
     finally:
         if managed_tr:
             self.use_trust_region = old_use_trust_region
+    prediction_error_reexplore = bool(
+        getattr(self, "cbo_prediction_error_reexplore", getattr(CFG, "CBO_PREDICTION_ERROR_REEXPLORE", False))
+    )
     if tr_mode in {"adaptive", "residual_adaptive", "condition_adaptive"}:
         _cbo_update_tr_radius_after_tell(self, float(cost), prev_best_value=prev_best_value, radius_before=radius_before)
-        if tr_mode in {"residual_adaptive", "condition_adaptive"}:
+        if tr_mode in {"residual_adaptive", "condition_adaptive"} or prediction_error_reexplore:
             _cbo_update_residual_condition_state(self, float(cost))
         else:
             _cbo_update_prediction_error_diagnostics(self, float(cost))
     elif tr_mode == "good_region":
         self.cbo_tr_update_reason = "good_region_fixed_radius"
-        _cbo_update_prediction_error_diagnostics(self, float(cost))
+        if prediction_error_reexplore:
+            _cbo_update_residual_condition_state(self, float(cost))
+        else:
+            _cbo_update_prediction_error_diagnostics(self, float(cost))
     else:
-        _cbo_update_prediction_error_diagnostics(self, float(cost))
+        if prediction_error_reexplore:
+            _cbo_update_residual_condition_state(self, float(cost))
+        else:
+            _cbo_update_prediction_error_diagnostics(self, float(cost))
 
 
 FederatedBOAgent.tell = _stability_tell
@@ -6333,6 +7584,15 @@ def _cbo_candidate_rows(agent, candidates, sources, mu, sigma, score, selected_i
 def _stability_ask_contextual(self, state=None, context=None):
     tr_mode = str(getattr(self, "cbo_tr_mode", _cfg_cbo_str("CBO_TR_MODE", "off")) or "off").lower()
     self._active_context = context
+    probe_theta, probe_debug = _cbo_phase_reference_probe_theta(self)
+    if probe_theta is not None:
+        return _cbo_commit_phase_reference_probe(self, probe_theta, probe_debug)
+    if isinstance(getattr(self, "last_debug_info", None), dict):
+        for key in list(self.last_debug_info):
+            if str(key).startswith("phase_reference_probe_"):
+                self.last_debug_info.pop(key, None)
+        if self.last_debug_info.get("phase_reuse_relation") == "reference_probe":
+            self.last_debug_info.pop("phase_reuse_relation", None)
     if tr_mode == "off":
         theta = _ORIG_AGENT_ASK_CONTEXTUAL_STABILITY(self, state=state, context=context)
         hist = dict(getattr(self, "last_history_debug", {}) or {})
@@ -6536,6 +7796,10 @@ USER_METHOD_ALIASES = {
     "reduced7_bo_adaptive": "reduced7_bo_adaptive",
     "bo-adaptive": "reduced7_bo_adaptive",
     "bo_adaptive": "reduced7_bo_adaptive",
+    "reduced7-bo-adaptive-all": "reduced7_bo_adaptive_all_history",
+    "reduced7_bo_adaptive_all": "reduced7_bo_adaptive_all_history",
+    "bo-adaptive-all": "reduced7_bo_adaptive_all_history",
+    "bo_adaptive_all": "reduced7_bo_adaptive_all_history",
     "reduced7-cbo": "reduced7_cbo_lite_pressure_taskmix_counts",
     "reduced7_cbo": "reduced7_cbo_lite_pressure_taskmix_counts",
     "reduced7-cbo-ptc": "reduced7_cbo_lite_pressure_taskmix_counts",
@@ -6543,6 +7807,10 @@ USER_METHOD_ALIASES = {
     "cbo-reduced7": "reduced7_cbo_lite_pressure_taskmix_counts",
     "cbo_reduced7": "reduced7_cbo_lite_pressure_taskmix_counts",
     "cbo7": "reduced7_cbo_lite_pressure_taskmix_counts",
+    "reduced7-cbo-all": "reduced7_cbo_lite_pressure_taskmix_counts_all_history",
+    "reduced7_cbo_all": "reduced7_cbo_lite_pressure_taskmix_counts_all_history",
+    "cbo7-all": "reduced7_cbo_lite_pressure_taskmix_counts_all_history",
+    "cbo7_all": "reduced7_cbo_lite_pressure_taskmix_counts_all_history",
     "reduced7-cbo-i4": "reduced7_cbo_lite_internal4",
     "reduced7_cbo_i4": "reduced7_cbo_lite_internal4",
     "cbo7-i4": "reduced7_cbo_lite_internal4",
@@ -6555,6 +7823,20 @@ USER_METHOD_ALIASES = {
     "reduced7_cbo_i4ctx": "reduced7_cbo_lite_internal4_context",
     "cbo7-i4ctx": "reduced7_cbo_lite_internal4_context",
     "cbo7_i4ctx": "reduced7_cbo_lite_internal4_context",
+    "reduced7-cbo-i4ctx-threshold": "reduced7_cbo_lite_internal4_context_threshold",
+    "reduced7_cbo_i4ctx_threshold": "reduced7_cbo_lite_internal4_context_threshold",
+    "cbo7-i4ctx-threshold": "reduced7_cbo_lite_internal4_context_threshold",
+    "reduced7-cbo-i4ctx-decay": "reduced7_cbo_lite_internal4_context_decay",
+    "reduced7_cbo_i4ctx_decay": "reduced7_cbo_lite_internal4_context_decay",
+    "cbo7-i4ctx-decay": "reduced7_cbo_lite_internal4_context_decay",
+    "reduced7-cbo-i4-recent80": "reduced7_cbo_internal4_recent80",
+    "reduced7_cbo_i4_recent80": "reduced7_cbo_internal4_recent80",
+    "reduced7-cbo-i4-all": "reduced7_cbo_internal4_all_history",
+    "reduced7_cbo_i4_all": "reduced7_cbo_internal4_all_history",
+    "reduced7-cbo-i4-phase-reuse": "reduced7_cbo_internal4_phase_adaptive_reuse",
+    "reduced7_cbo_i4_phase_reuse": "reduced7_cbo_internal4_phase_adaptive_reuse",
+    "reduced7-cbo-i4-phase-hierarchical": "reduced7_cbo_internal4_phase_hierarchical_reuse",
+    "reduced7_cbo_i4_phase_hierarchical": "reduced7_cbo_internal4_phase_hierarchical_reuse",
     "reduced9-fixed-mid": "reduced9_fixed_mid",
     "reduced9_fixed_mid": "reduced9_fixed_mid",
     "reduced9-fixed-tuned": "reduced9_fixed_tuned",
@@ -7328,6 +8610,13 @@ def run_scenario_group(seed, group_key, group_cfg):
         else:
             ask_state = state if getattr(fac.agent, "use_state_partition", False) else None
             ask_ctx = ctx if getattr(fac.agent, "use_context", False) else None
+            # Keep the dynamic phase coordinate independent from optional
+            # external-context diagnostics. A failure in those diagnostics
+            # must not make the selector infer the phase from history length.
+            try:
+                fac.agent._active_bo_iter = int(i)
+            except Exception:
+                pass
             try:
                 fac.agent._active_external_context = list(external_ctx)
                 fac.agent._active_external_context_feature_names = list(EXTERNAL_CONTEXT_FEATURE_NAMES)
@@ -7469,7 +8758,13 @@ def run_scenario_group(seed, group_key, group_cfg):
                 "adaptive_plausible_margin", "adaptive_plausible_fraction", "adaptive_plausible_margin_mult",
                 "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
                 "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
-                "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct", "residual_trigger",
+                "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
+                "residual_condition_trigger", "residual_trigger",
+                "residual_trigger_surprise", "residual_trigger_surprise_source",
+                "reexplore_phase_iter", "reexplore_phase_max_iter", "reexplore_phase_window_allowed",
+                "reexplore_relation", "reexplore_relation_allowed", "reexplore_consecutive_count",
+                "reexplore_consecutive_required", "reexplore_phase_trigger_count", "reexplore_phase_trigger_limit",
+                "reexplore_countdown_renew_blocked",
                 "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
                 "runtime_anchor_override",
             ]:
@@ -7494,6 +8789,55 @@ def run_scenario_group(seed, group_key, group_cfg):
             _, sigma_acq_diag = _cbo_sigma_for_acquisition(fac.agent, [0.0], [0.0])
             safe_info.update(sigma_acq_diag)
         for diag_key in [
+            "history_select_mode", "effective_history_mode", "effective_recent_window",
+            "selected_recent_count", "selected_macro_count", "selected_context_count",
+            "selected_elite_count", "selected_diverse_count", "selected_total_count",
+            "external_internal_threshold_enabled", "external_internal_external_threshold",
+            "external_internal_internal_threshold", "external_internal_external_topk",
+            "external_internal_context_k", "external_internal_min_rows",
+            "external_internal_external_min_rows", "external_internal_recent_keep",
+            "external_internal_weak_fallback_k", "external_internal_raw_records",
+            "external_internal_external_passed_count", "external_internal_external_pool_count",
+            "external_internal_internal_scored_count", "external_internal_internal_strong_count",
+            "external_internal_internal_weak_count", "external_internal_selected_strong_count",
+            "external_internal_selected_weak_count", "external_internal_selected_recent_count",
+            "external_internal_final_fallback_count", "external_internal_fallback_used",
+            "external_internal_external_fallback_used", "external_internal_external_fallback_reason",
+            "external_internal_selected_external_similarity_mean",
+            "external_internal_selected_external_similarity_min",
+            "external_internal_selected_internal_similarity_mean",
+            "external_internal_selected_internal_similarity_min",
+            "external_internal_selected_phase_counts",
+            "phase_reuse_relation", "phase_reuse_current_bo_iter",
+            "phase_reuse_current_phase_id", "phase_reuse_current_phase_name",
+            "phase_reuse_target_rows", "phase_reuse_memory_keep",
+            "phase_reuse_current_available_count", "phase_reuse_current_selected_count",
+            "phase_reuse_history_budget", "phase_reuse_exact_available_count",
+            "phase_reuse_partial_available_count", "phase_reuse_exact_selected_count",
+            "phase_reuse_partial_selected_count", "phase_reuse_global_selected_count",
+            "phase_reuse_total_selected_count", "phase_reuse_component_threshold",
+            "phase_reuse_taskmix_min_sim", "phase_reuse_overall_sim_threshold",
+            "phase_reuse_taskmix_weight", "phase_reuse_similar_initial_cap",
+            "phase_reuse_similar_decay_end", "phase_reuse_intensity_only_rejected_count",
+            "phase_reuse_taskmix_gate_rejected_count", "phase_reuse_overall_similarity_mean",
+            "phase_reuse_overall_similarity_max", "phase_reuse_archive_scene_count",
+            "phase_reuse_archive_rows_total", "phase_reuse_policy",
+            "phase_reuse_external_signature_source",
+            "phase_reuse_target_reference_ready", "phase_reuse_reference_aligned_labels",
+            "phase_reuse_novel_global_fallback_enabled", "phase_reuse_unrelated_global_fallback_enabled",
+            "phase_reuse_similar_fill_target_enabled", "phase_reuse_exact_use_similar_fallback",
+            "phase_reuse_internal_hard_gate_enabled", "phase_reuse_internal_hard_gate_threshold",
+            "phase_reuse_internal_hard_gate_rejected_count", "phase_reuse_similar_training_target_enabled",
+            "phase_reuse_similar_training_target",
+            "phase_reuse_similar_transfer_weight_mean", "phase_reuse_similar_transfer_weight_min",
+            "phase_reuse_similar_transfer_weight_max", "phase_reuse_weighted_effective_samples",
+            "phase_reference_reuse_mode", "phase_reference_candidate_signature",
+            "history_target_reference_id", "history_reference_mismatch_count",
+            "history_relabelled_count", "history_relabel_delta_mean", "history_relabel_delta_max_abs",
+            "phase_reference_probe_used", "phase_reference_probe_phase_id",
+            "phase_reference_probe_phase_name", "phase_reference_probe_phase_iter",
+            "phase_reference_probe_source", "phase_reference_probe_target_signature",
+            "phase_reference_probe_candidate_signature",
             "selected_candidate_source", "selected_candidate_mu", "selected_candidate_sigma",
             "selected_candidate_acq", "selected_candidate_score", "selected_candidate_beta_eff",
             "selected_candidate_rank_by_score", "selected_candidate_rank_by_mu",
@@ -7536,16 +8880,28 @@ def run_scenario_group(seed, group_key, group_cfg):
             "sigma_calibrated", "sigma_acq", "sigma_calibration_use_in_acq",
             "sigma_calibration_eta", "sigma_acq_formula",
             "adaptive_scene_key", "adaptive_exploration_demand", "adaptive_exploration_target",
+            "adaptive_phase_relation", "adaptive_sample_target",
             "adaptive_beta", "adaptive_eta", "adaptive_data_need", "adaptive_data_need_linear",
+            "adaptive_forced_reexplore_need",
             "adaptive_reexplore_need", "adaptive_reexplore_gain", "adaptive_stagnation",
             "adaptive_uncertainty_need", "adaptive_safety_factor", "adaptive_dynamic_risk", "adaptive_effective_samples",
             "adaptive_progress_rate", "adaptive_risk_reason", "adaptive_risk_backlog",
             "adaptive_risk_unfinished", "adaptive_risk_unfinished_trend", "adaptive_risk_max_util",
             "adaptive_plausible_margin", "adaptive_plausible_fraction", "adaptive_plausible_margin_mult",
             "raw_surprise", "calibrated_surprise", "calibration_buffer_size",
+            "transfer_noise_enabled", "transfer_noise_learn_base", "transfer_noise_mode",
+            "transfer_weight_mean", "transfer_weight_min", "transfer_weight_max",
+            "transfer_extra_noise_std_mean", "transfer_extra_noise_std_max",
+            "transfer_learned_base_noise_var", "transfer_learned_base_noise_std",
+            "transfer_noise_std_mean", "transfer_noise_std_max",
             "sigma_scale_estimated", "sigma_scale_history_weight", "sigma_calibration_enabled", "sigma_floor",
             "surprise", "prediction_error_valid", "prediction_error_skipped_reason", "cost_gap_pct",
-            "residual_trigger", "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
+            "residual_condition_trigger", "residual_trigger", "residual_trigger_surprise", "residual_trigger_surprise_source",
+            "reexplore_phase_iter", "reexplore_phase_max_iter", "reexplore_phase_window_allowed",
+            "reexplore_relation", "reexplore_relation_allowed", "reexplore_consecutive_count",
+            "reexplore_consecutive_required", "reexplore_phase_trigger_count", "reexplore_phase_trigger_limit",
+            "reexplore_countdown_renew_blocked",
+            "condition_trigger", "radius_min_stuck_count", "force_explore_countdown",
             "runtime_anchor_override", "cbo_tr_radius_after_update", "selected_reason",
             "cbo_warm_start_enabled", "cbo_warm_start_mode", "cbo_warm_start_loaded_rows",
             "cbo_warm_start_used_rows", "selected_warm_rows_count", "selected_local_rows_count",

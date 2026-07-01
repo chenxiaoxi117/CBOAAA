@@ -538,6 +538,17 @@ class FederatedBOAgent:
 
     def _archive_state_sample(self, state, sample):
         rec = self._unpack_sample(sample)
+        select_mode = str(getattr(self, "cbo_history_select_mode", "") or "").strip().lower()
+        phase_signature = rec.get("dynamic_external_signature")
+        if select_mode == "phase_hierarchical_reuse" and phase_signature:
+            key = ("EXTERNAL_PHASE", str(phase_signature))
+            bucket = self.local_archive[key]
+            bucket.append(rec)
+            bucket.sort(key=lambda x: int(x.get("bo_iter", -1) if x.get("bo_iter") is not None else -1))
+            cap = max(1, int(getattr(self, "cbo_phase_archive_per_scene", getattr(CFG, "DEFAULT_CBO_PHASE_ARCHIVE_PER_SCENE", 80))))
+            if len(bucket) > cap:
+                bucket[:] = bucket[-cap:]
+            return
         key = state if state is not None else "GLOBAL"
         bucket = self.local_archive[key]
         bucket.append(rec)
@@ -625,6 +636,66 @@ class FederatedBOAgent:
             y = torch.empty(0, 1, dtype=torch.double)
         return x, y, records
 
+    def _transfer_train_yvar(self, records):
+        """Return standardized observation variances for transfer-aware GP fitting."""
+        if not bool(getattr(self, "cbo_transfer_noise_enabled", False)):
+            return None, {}
+        learn_base = bool(getattr(self, "cbo_transfer_noise_learn_base", False))
+        floor_default = 0.001 if learn_base else 0.02
+        floor = max(1e-6, float(getattr(self, "cbo_transfer_noise_floor", floor_default)))
+        scale = max(0.0, float(getattr(self, "cbo_transfer_noise_scale", 0.35)))
+        weight_ratio_mode = bool(getattr(self, "cbo_transfer_noise_weight_ratio", False))
+        ratio_scale = max(0.0, float(getattr(self, "cbo_transfer_noise_ratio_scale", 0.75)))
+        ratio_cap = max(floor, float(getattr(self, "cbo_transfer_noise_ratio_cap", 0.80)))
+        weights = []
+        noise_std = []
+        for rec in list(records or []):
+            try:
+                weight = float(rec.get("_cbo_transfer_weight", 1.0))
+            except Exception:
+                weight = 1.0
+            weight = float(np.clip(weight, 0.0, 1.0))
+            weights.append(weight)
+            reuse_class = str(rec.get("_cbo_phase_reuse_class", "") or "").strip().lower()
+            if learn_base:
+                # The likelihood learns one shared observation-noise term.  The
+                # fixed per-row term below is only the extra transfer penalty;
+                # current/exact rows therefore no longer pretend that 0.02 is
+                # their complete observation noise.
+                if reuse_class == "similar" and weight_ratio_mode:
+                    # Targets are standardized before GP fitting.  A ratio
+                    # penalty therefore remains meaningful even when the
+                    # learned shared noise is much larger than the old fixed
+                    # additive transfer penalty.
+                    safe_weight = max(weight, 1e-6)
+                    ratio_extra = ratio_scale * float(np.sqrt(max(0.0, 1.0 / safe_weight - 1.0)))
+                    extra_std = min(ratio_cap, floor + ratio_extra)
+                else:
+                    extra_std = floor + ((1.0 - weight) * scale if reuse_class == "similar" else 0.0)
+                noise_std.append(extra_std)
+            else:
+                noise_std.append(floor + (1.0 - weight) * scale)
+        if not noise_std:
+            return None, {}
+        yvar = torch.tensor([[value * value] for value in noise_std], dtype=torch.double)
+        info = {
+            "transfer_noise_enabled": 1,
+            "transfer_noise_learn_base": int(learn_base),
+            "transfer_noise_mode": (
+                "learned_base_plus_weight_ratio_extra"
+                if learn_base and weight_ratio_mode
+                else ("learned_base_plus_transfer_extra" if learn_base else "fixed_total_by_transfer_weight")
+            ),
+            "transfer_weight_mean": float(np.mean(weights)),
+            "transfer_weight_min": float(np.min(weights)),
+            "transfer_weight_max": float(np.max(weights)),
+            "transfer_extra_noise_std_mean": float(np.mean(noise_std)),
+            "transfer_extra_noise_std_max": float(np.max(noise_std)),
+            "transfer_noise_std_mean": float(np.mean(noise_std)),
+            "transfer_noise_std_max": float(np.max(noise_std)),
+        }
+        return yvar, info
+
     def fit_local_gp(self, state=None):
         """用当前收集到的样本拟合一个本地 GP 代理模型。"""
         x, y, records = self._training_data(state=state)
@@ -643,12 +714,44 @@ class FederatedBOAgent:
             y_std_vals = (y_fit - y_mean) / y_std
             bounds_full = self._combined_bounds()
             x_norm = torch.clamp(normalize(x_fit, bounds_full), 0.0, 1.0)
-            gp = SingleTaskGP(x_norm, y_std_vals)
-            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+            train_yvar, transfer_noise_info = self._transfer_train_yvar(records_fit)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
+                if train_yvar is None:
+                    gp = SingleTaskGP(x_norm, y_std_vals)
+                elif bool(getattr(self, "cbo_transfer_noise_learn_base", False)):
+                    likelihood = FixedNoiseGaussianLikelihood(
+                        noise=train_yvar.squeeze(-1),
+                        learn_additional_noise=True,
+                    )
+                    # y_std_vals and train_yvar are already on the standardized
+                    # target scale, so no second outcome transform is needed.
+                    gp = SingleTaskGP(
+                        x_norm,
+                        y_std_vals,
+                        train_Yvar=train_yvar,
+                        likelihood=likelihood,
+                        outcome_transform=None,
+                    )
+                else:
+                    gp = SingleTaskGP(x_norm, y_std_vals, train_Yvar=train_yvar)
+                mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
                 fit_gpytorch_mll(mll)
             gp.eval()
+            if bool(getattr(self, "cbo_transfer_noise_learn_base", False)):
+                try:
+                    learned_var = float(gp.likelihood.second_noise.detach().double().mean().item())
+                    learned_std = float(np.sqrt(max(learned_var, 0.0)))
+                    extra = np.asarray([
+                        float(np.sqrt(max(v, 0.0))) for v in train_yvar.detach().cpu().view(-1).tolist()
+                    ], dtype=float)
+                    transfer_noise_info["transfer_learned_base_noise_var"] = learned_var
+                    transfer_noise_info["transfer_learned_base_noise_std"] = learned_std
+                    transfer_noise_info["transfer_noise_std_mean"] = float(np.mean(np.sqrt(learned_var + np.square(extra))))
+                    transfer_noise_info["transfer_noise_std_max"] = float(np.max(np.sqrt(learned_var + np.square(extra))))
+                except Exception:
+                    transfer_noise_info["transfer_learned_base_noise_var"] = np.nan
+                    transfer_noise_info["transfer_learned_base_noise_std"] = np.nan
             return {
                 "gp": gp,
                 "y_mean": y_mean.detach(),
@@ -658,6 +761,7 @@ class FederatedBOAgent:
                 "raw_y": y.detach().clone(),
                 "used_y": y_fit.detach().clone(),
                 "denoise_stats": dict(getattr(self, "cbo_last_history_denoise_stats", {}) or {}),
+                "transfer_noise_info": transfer_noise_info,
             }
         except Exception as e:
             print(f"fit_local_gp failed: {e}")

@@ -60,6 +60,7 @@ from enum import Enum
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.likelihoods import FixedNoiseGaussianLikelihood
 from botorch.acquisition import LogExpectedImprovement
 from botorch.optim import optimize_acqf
 from botorch.utils.transforms import standardize, normalize, unnormalize
@@ -939,6 +940,9 @@ class ExperimentConfig:
     SCENARIO_NORMALIZATION_REFERENCE_CACHE = {}
     PHASE_REFERENCE_SCOPE = "significant_external"
     PHASE_REFERENCE_SWITCH_MODE = "dynamic_schedule"
+    # significant_external preserves legacy behavior. exact_only only reuses a
+    # frozen reference for the same (or tolerance-equivalent) external scene.
+    PHASE_REFERENCE_REUSE_MODE = "significant_external"
     PHASE_LAMBDA_REL_THRESHOLD = 0.30
     PHASE_TASK_MIX_L1_THRESHOLD = 0.25
     PHASE_DEADLINE_PRESSURE_REL_THRESHOLD = 0.20
@@ -967,6 +971,24 @@ class ExperimentConfig:
     DEFAULT_CBO_EXTERNAL_INTERNAL_TOPK = 400
     DEFAULT_CBO_EXTERNAL_INTERNAL_MIN_ROWS = 40
     DEFAULT_CBO_EXTERNAL_INTERNAL_RECENT_KEEP = 20
+    DEFAULT_CBO_HISTORY_TARGET_ROWS = 80
+    DEFAULT_CBO_HISTORY_SIMILAR_KEEP = 16
+    DEFAULT_CBO_HISTORY_GLOBAL_KEEP = 4
+    DEFAULT_CBO_HISTORY_GLOBAL_MAX = 20
+    DEFAULT_CBO_PHASE_MEMORY_KEEP = 10
+    DEFAULT_CBO_PHASE_COMPONENT_SIM_THRESHOLD = 0.70
+    DEFAULT_CBO_PHASE_EXACT_INTENSITY_TOL = 0.10
+    DEFAULT_CBO_PHASE_EXACT_TASKMIX_L1_TOL = 0.06
+    DEFAULT_CBO_PHASE_TASKMIX_MIN_SIM = 0.70
+    DEFAULT_CBO_PHASE_OVERALL_SIM_THRESHOLD = 0.65
+    DEFAULT_CBO_PHASE_TASKMIX_WEIGHT = 0.75
+    DEFAULT_CBO_PHASE_SIMILAR_INITIAL_CAP = 40
+    DEFAULT_CBO_PHASE_SIMILAR_DECAY_END = 80
+    DEFAULT_CBO_PHASE_ARCHIVE_PER_SCENE = 80
+    DEFAULT_CBO_PREDICTION_ERROR_REEXPLORE = False
+    DEFAULT_CBO_EXTERNAL_INTENSITY_MAX_DIFF = -1.0
+    DEFAULT_CBO_EXTERNAL_LENGTHSCALE_INTENSITY = 0.75
+    DEFAULT_CBO_EXTERNAL_LENGTHSCALE_TASKMIX = 0.25
     DEFAULT_CBO_ELITE_K = 20
     DEFAULT_CBO_DIVERSE_K = 20
     DEFAULT_CBO_ROBUST_SCORE_MODE = "none"
